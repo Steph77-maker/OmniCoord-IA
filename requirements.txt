@@ -1,0 +1,6 @@
+streamlit
+toml
+fpdf2
+pandas
+pypdf
+google-generativeai
