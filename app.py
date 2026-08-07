@@ -1,4 +1,3 @@
-
 import datetime
 import email
 from email.header import decode_header
@@ -35,7 +34,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- CHARTE GRAPHIQUE : BLEU MÉDICAL / NUIT PROFOND + ACIER BROSSÉ ---
+# --- CHARTE GRAPHIQUE : BLEU MÉDICAL / NUIT PROFOND + ACIER BROSSÉ (CORRIGÉ LISIBILITÉ) ---
 CUSTOM_CSS = """
 <style>
     :root {
@@ -53,28 +52,22 @@ CUSTOM_CSS = """
 
     .stApp {
         background: linear-gradient(160deg, var(--oc-navy-deep) 0%, var(--oc-navy) 55%, #0d2138 100%);
-        color: #e6ecf2;
+        color: #f2f5f8 !important;
     }
 
     section[data-testid="stSidebar"] {
         background: linear-gradient(180deg, #0c1f33 0%, #0a1929 100%);
         border-right: 1px solid rgba(137, 150, 163, 0.25);
     }
-
-    h1, h2, h3 {
-        color: #f2f5f8 !important;
-        letter-spacing: 0.3px;
-    }
-
-    /* Correction globale pour rendre tous les textes et labels bien visibles */
+    
+    /* Forcer la lisibilité de tous les textes généraux, paragraphes et labels */
     p, span, label, .stMarkdown, div[data-baseweb="select"] span {
-        color: #e6ecf2 !important;
+        color: #f2f5f8 !important;
     }
 
-    /* Visibilité spécifique pour les labels de filtres et selectbox */
-    .stSelectbox label, .stTextInput label, .stNumberInput label, .stDateInput label {
-        color: #b8c2cc !important;
-        font-weight: 500;
+    h1, h2, h3, h4, h5, h6 {
+        color: #ffffff !important;
+        letter-spacing: 0.3px;
     }
 
     .oc-badge {
@@ -92,6 +85,7 @@ CUSTOM_CSS = """
         border-radius: 12px;
         padding: 18px 20px;
         margin-bottom: 14px;
+        color: #f2f5f8 !important;
     }
 
     .oc-card-alert {
@@ -124,10 +118,35 @@ CUSTOM_CSS = """
     .stButton > button:hover {
         background: linear-gradient(135deg, var(--oc-medical-blue-soft) 0%, var(--oc-medical-blue) 100%);
         border: none;
+        color: white;
     }
 
     div[data-testid="stMetricValue"] {
         color: var(--oc-medical-blue-soft) !important;
+    }
+    
+    /* Correction des champs de saisie (inputs, selectbox, text areas) pour texte bien blanc sur fond sombre */
+    input, textarea, select {
+        color: #ffffff !important;
+    }
+    
+    div[data-baseweb="input"] {
+        background-color: rgba(19, 47, 76, 0.6) !important;
+        color: #ffffff !important;
+    }
+
+    /* Correction spécifique pour les libellés et champs de la page de connexion */
+    div[data-testid="stTextInput"] label p,
+    div[data-testid="stPasswordInput"] label p,
+    .stTextInput label, 
+    .stPasswordInput label {
+        color: #f2f5f8 !important;
+        font-weight: 600 !important;
+    }
+
+    div[data-baseweb="base-input"] input {
+        color: #ffffff !important;
+        background-color: rgba(13, 33, 56, 0.8) !important;
     }
 </style>
 """
@@ -294,7 +313,15 @@ def initialiser_auth_db():
                 mail_imap TEXT,
                 nb_requetes_ia INTEGER DEFAULT 0,
                 quota_max INTEGER DEFAULT 20,
-                statut_abonnement TEXT DEFAULT 'ESSAI'
+                statut_abonnement TEXT DEFAULT 'ESSAI',
+                structure_id INTEGER
+            )
+        """)
+        c_auth.execute("""
+            CREATE TABLE IF NOT EXISTS structures (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nom TEXT UNIQUE,
+                date_creation TEXT
             )
         """)
         conn_auth.commit()
@@ -315,15 +342,38 @@ def initialiser_auth_db():
             default_mail = st.secrets.get("EMAIL_USER", "")
             default_pwd = st.secrets.get("EMAIL_PASSWORD", "")
             default_imap = st.secrets.get("EMAIL_IMAP", "imap.gmail.com")
+
             c_auth.execute(
-                """INSERT INTO utilisateurs (email, password, date_fin_essai, est_admin, mail_perso, mail_password, mail_imap, nb_requetes_ia, quota_max, statut_abonnement)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                ("admin@omnicoord.fr", mdp_admin_hash, "2099-12-31", 1, default_mail, default_pwd, default_imap, 0, 999999, "PRO"),
+                "INSERT INTO structures (nom, date_creation) VALUES (?, ?)",
+                ("Structure Interne / Démo", datetime.date.today().isoformat())
+            )
+            structure_admin_id = c_auth.lastrowid
+
+            c_auth.execute(
+                """INSERT INTO utilisateurs (email, password, date_fin_essai, est_admin, mail_perso, mail_password, mail_imap, nb_requetes_ia, quota_max, statut_abonnement, structure_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ("admin@omnicoord.fr", mdp_admin_hash, "2099-12-31", 1, default_mail, default_pwd, default_imap, 0, 999999, "PRO", structure_admin_id),
             )
             conn_auth.commit()
         conn_auth.close()
     except Exception as e:
         st.error(f"Erreur d'initialisation du système d'authentification : {e}")
+
+
+def get_or_create_structure(nom_structure):
+    """Retourne l'id de la structure portant ce nom, en la créant si besoin."""
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("SELECT id FROM structures WHERE nom = ?", (nom_structure,))
+    row = c.fetchone()
+    if row:
+        structure_id = row[0]
+    else:
+        c.execute("INSERT INTO structures (nom, date_creation) VALUES (?, ?)", (nom_structure, datetime.date.today().isoformat()))
+        conn.commit()
+        structure_id = c.lastrowid
+    conn.close()
+    return structure_id
 
 
 def check_password():
@@ -352,14 +402,15 @@ def check_password():
                     conn = sqlite3.connect(DB_NAME)
                     c = conn.cursor()
                     c.execute(
-                        "SELECT password, date_fin_essai, est_admin, mail_perso, mail_password, mail_imap FROM utilisateurs WHERE email = ?",
+                        """SELECT password, date_fin_essai, est_admin, mail_perso, mail_password, mail_imap, structure_id
+                           FROM utilisateurs WHERE email = ?""",
                         (email_saisi,)
                     )
                     row = c.fetchone()
                     conn.close()
 
                     if row:
-                        db_password, db_date_fin, db_is_admin, m_mail, m_pass, m_imap = row
+                        db_password, db_date_fin, db_is_admin, m_mail, m_pass, m_imap, db_structure_id = row
 
                         if verifier_mdp(pwd_saisi, db_password):
                             if not mdp_est_hashe(db_password):
@@ -382,6 +433,14 @@ def check_password():
                                 st.session_state["password_correct"] = True
                                 st.session_state["user_email"] = email_saisi
                                 st.session_state["is_admin"] = bool(db_is_admin)
+                                st.session_state["structure_id"] = db_structure_id
+                                try:
+                                    conn_s = sqlite3.connect(DB_NAME)
+                                    row_s = conn_s.execute("SELECT nom FROM structures WHERE id = ?", (db_structure_id,)).fetchone()
+                                    conn_s.close()
+                                    st.session_state["structure_nom"] = row_s[0] if row_s else "Non assignée"
+                                except Exception:
+                                    st.session_state["structure_nom"] = "Non assignée"
                                 st.session_state["mail_config"] = {
                                     "email": m_mail or "", "password": m_pass or "", "imap": m_imap or "imap.gmail.com"
                                 }
@@ -424,6 +483,7 @@ def initialiser_tables_metier():
     c.execute("""
         CREATE TABLE IF NOT EXISTS beneficiaires (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            structure_id INTEGER,
             nom TEXT, prenom TEXT, adresse TEXT, telephone TEXT,
             niveau_dependance TEXT,
             pathologies TEXT,
@@ -439,6 +499,7 @@ def initialiser_tables_metier():
     c.execute("""
         CREATE TABLE IF NOT EXISTS intervenants (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            structure_id INTEGER,
             nom TEXT, prenom TEXT, telephone TEXT, email TEXT,
             type_statut TEXT,       -- Interne / Vivier candidat / Externe ponctuel
             competences TEXT,
@@ -454,6 +515,7 @@ def initialiser_tables_metier():
     c.execute("""
         CREATE TABLE IF NOT EXISTS habilitations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            structure_id INTEGER,
             intervenant_id INTEGER,
             type_habilitation TEXT,   -- Diplôme AES, DEAES, PSC1, Permis B, Visite médicale, etc.
             date_obtention TEXT,
@@ -465,6 +527,7 @@ def initialiser_tables_metier():
     c.execute("""
         CREATE TABLE IF NOT EXISTS interventions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            structure_id INTEGER,
             beneficiaire_id INTEGER,
             intervenant_id INTEGER,
             date_intervention TEXT,
@@ -481,6 +544,7 @@ def initialiser_tables_metier():
     c.execute("""
         CREATE TABLE IF NOT EXISTS documents_transmissions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            structure_id INTEGER,
             beneficiaire_id INTEGER,
             intervenant_id INTEGER,
             date_creation TEXT,
@@ -520,6 +584,7 @@ def executer(requete, params=()):
 # ============================================================
 st.sidebar.markdown("### ⚙️ Mon Compte")
 st.sidebar.caption(f"Connecté : {st.session_state.get('user_email', '')}")
+st.sidebar.caption(f"🏢 Structure : {st.session_state.get('structure_nom', 'Non assignée')}")
 
 peut_ia, nb_req, quota_max = peut_utiliser_ia(st.session_state.get("user_email", ""))
 if quota_max >= 999999:
@@ -542,23 +607,34 @@ if st.session_state.get("is_admin", False):
     st.sidebar.markdown("### 👑 Administration")
 
     with st.sidebar.expander("➕ Créer un accès structure/utilisateur"):
+        df_structures_existantes = charger_df("SELECT nom FROM structures ORDER BY nom")
         with st.form("form_add_user"):
+            p_structure_existante = st.selectbox(
+                "Structure existante (ou laisser vide pour en créer une nouvelle)",
+                [""] + df_structures_existantes["nom"].tolist() if not df_structures_existantes.empty else [""]
+            )
+            p_structure_nouvelle = st.text_input("OU nom d'une nouvelle structure")
             p_email = st.text_input("Email du nouvel utilisateur")
             p_pwd = st.text_input("Mot de passe temporaire")
             p_duree = st.number_input("Durée d'accès (jours)", min_value=1, value=30)
             btn_add = st.form_submit_button("Créer l'accès")
 
             if btn_add and p_email and p_pwd:
-                date_fin_calc = (datetime.date.today() + datetime.timedelta(days=int(p_duree))).isoformat()
-                try:
-                    executer(
-                        """INSERT INTO utilisateurs (email, password, date_fin_essai, est_admin, nb_requetes_ia, quota_max)
-                           VALUES (?, ?, ?, 0, 0, 20)""",
-                        (p_email, hacher_mdp(p_pwd), date_fin_calc)
-                    )
-                    st.success(f"Accès créé pour {p_email} jusqu'au {datetime.date.fromisoformat(date_fin_calc).strftime('%d/%m/%Y')} ! Mot de passe à communiquer : **{p_pwd}**")
-                except Exception as e_add:
-                    st.error(f"Erreur : {e_add}")
+                nom_structure_finale = p_structure_nouvelle.strip() if p_structure_nouvelle.strip() else p_structure_existante
+                if not nom_structure_finale:
+                    st.error("Merci d'indiquer une structure (existante ou nouvelle).")
+                else:
+                    structure_id_new = get_or_create_structure(nom_structure_finale)
+                    date_fin_calc = (datetime.date.today() + datetime.timedelta(days=int(p_duree))).isoformat()
+                    try:
+                        executer(
+                            """INSERT INTO utilisateurs (email, password, date_fin_essai, est_admin, nb_requetes_ia, quota_max, structure_id)
+                               VALUES (?, ?, ?, 0, 0, 20, ?)""",
+                            (p_email, hacher_mdp(p_pwd), date_fin_calc, structure_id_new)
+                        )
+                        st.success(f"Accès créé pour {p_email} (structure : {nom_structure_finale}) jusqu'au {datetime.date.fromisoformat(date_fin_calc).strftime('%d/%m/%Y')} ! Mot de passe à communiquer : **{p_pwd}**")
+                    except Exception as e_add:
+                        st.error(f"Erreur : {e_add}")
 
     with st.sidebar.expander("🔑 Changer mon mot de passe"):
         with st.form("form_changer_mdp"):
@@ -589,19 +665,20 @@ st.sidebar.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=Tr
 #  MENU PRINCIPAL
 # ============================================================
 st.sidebar.markdown("### 📋 Menu principal")
-onglet = st.sidebar.radio(
-    "Navigation",
-    [
-        "🧑‍🤝‍🧑 Vivier & Sourcing Direct",
-        "🎯 Matching IA",
-        "❤️ Portefeuille Bénéficiaires",
-        "📝 Documents & Transmissions",
-        "📅 Plannings, Tournées & Urgences",
-        "✅ Conformité & Suivi",
-        "🛠️ Administration & Paramètres",
-    ],
-    label_visibility="collapsed"
-)
+
+_liste_onglets = [
+    "🧑‍🤝‍🧑 Vivier & Sourcing Direct",
+    "🎯 Matching IA",
+    "❤️ Portefeuille Bénéficiaires",
+    "📝 Documents & Transmissions",
+    "📅 Plannings, Tournées & Urgences",
+    "✅ Conformité & Suivi",
+    "👤 Mon Profil",
+]
+if st.session_state.get("is_admin", False):
+    _liste_onglets.append("🛠️ Administration")
+
+onglet = st.sidebar.radio("Navigation", _liste_onglets, label_visibility="collapsed")
 
 st.markdown(f"# {onglet}")
 st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
@@ -615,7 +692,7 @@ if onglet == "🧑‍🤝‍🧑 Vivier & Sourcing Direct":
     tab_liste, tab_ajout, tab_sourcing = st.tabs(["📋 Vivier actuel", "➕ Ajouter un intervenant", "🔎 Sourcing externe direct"])
 
     with tab_liste:
-        df_interv = charger_df("SELECT * FROM intervenants ORDER BY date_ajout DESC")
+        df_interv = charger_df("SELECT * FROM intervenants WHERE structure_id = ? ORDER BY date_ajout DESC", (st.session_state["structure_id"],))
         col_f1, col_f2 = st.columns(2)
         with col_f1:
             filtre_type = st.selectbox("Filtrer par statut", ["Tous", "Interne", "Vivier candidat", "Externe ponctuel"])
@@ -660,12 +737,12 @@ if onglet == "🧑‍🤝‍🧑 Vivier & Sourcing Direct":
                             key=f"dispo_{row['id']}"
                         )
                         if st.button("Mettre à jour", key=f"maj_dispo_{row['id']}"):
-                            executer("UPDATE intervenants SET statut_dispo = ? WHERE id = ?", (nouveau_statut, row["id"]))
+                            executer("UPDATE intervenants SET statut_dispo = ? WHERE id = ? AND structure_id = ?", (nouveau_statut, row["id"], st.session_state["structure_id"]))
                             st.success("Statut mis à jour.")
                             st.rerun()
                     with col_b:
                         if st.button("🗑️ Supprimer cet intervenant", key=f"del_{row['id']}"):
-                            executer("DELETE FROM intervenants WHERE id = ?", (row["id"],))
+                            executer("DELETE FROM intervenants WHERE id = ? AND structure_id = ?", (row["id"], st.session_state["structure_id"]))
                             st.warning("Intervenant supprimé.")
                             st.rerun()
                     st.write(f"**Parcours / expérience :** {row['experience_texte'] or 'Non renseigné'}")
@@ -692,9 +769,9 @@ if onglet == "🧑‍🤝‍🧑 Vivier & Sourcing Direct":
             submit_add = st.form_submit_button("Ajouter au vivier")
             if submit_add and nom and prenom:
                 executer(
-                    """INSERT INTO intervenants (nom, prenom, telephone, email, type_statut, competences, experience_texte, zone_geo, disponibilites, statut_dispo, source, date_ajout)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Disponible', ?, ?)""",
-                    (nom, prenom, telephone, email_i, type_statut, competences, experience_texte, zone_geo, disponibilites, source, datetime.date.today().isoformat())
+                    """INSERT INTO intervenants (structure_id, nom, prenom, telephone, email, type_statut, competences, experience_texte, zone_geo, disponibilites, statut_dispo, source, date_ajout)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Disponible', ?, ?)""",
+                    (st.session_state["structure_id"], nom, prenom, telephone, email_i, type_statut, competences, experience_texte, zone_geo, disponibilites, source, datetime.date.today().isoformat())
                 )
                 st.success(f"{prenom} {nom} ajouté(e) au vivier.")
                 st.rerun()
@@ -738,8 +815,8 @@ if onglet == "🧑‍🤝‍🧑 Vivier & Sourcing Direct":
 if onglet == "🎯 Matching IA":
     st.caption("Croise les besoins spécifiques d'un bénéficiaire avec les compétences, habilitations et la proximité des intervenants du vivier.")
 
-    df_benef = charger_df("SELECT * FROM beneficiaires WHERE statut = 'Actif' ORDER BY nom")
-    df_interv_dispo = charger_df("SELECT * FROM intervenants WHERE statut_dispo != 'Indisponible'")
+    df_benef = charger_df("SELECT * FROM beneficiaires WHERE statut = 'Actif' AND structure_id = ? ORDER BY nom", (st.session_state["structure_id"],))
+    df_interv_dispo = charger_df("SELECT * FROM intervenants WHERE statut_dispo != 'Indisponible' AND structure_id = ?", (st.session_state["structure_id"],))
 
     if df_benef.empty:
         st.info("Ajoute d'abord un bénéficiaire dans l'onglet « Portefeuille Bénéficiaires » pour lancer un matching.")
@@ -773,7 +850,7 @@ if onglet == "🎯 Matching IA":
                     total = len(df_interv_dispo)
 
                     for idx, (_, interv) in enumerate(df_interv_dispo.iterrows()):
-                        df_habs = charger_df("SELECT * FROM habilitations WHERE intervenant_id = ?", (int(interv["id"]),))
+                        df_habs = charger_df("SELECT * FROM habilitations WHERE intervenant_id = ? AND structure_id = ?", (int(interv["id"]), st.session_state["structure_id"]))
                         habs_txt = "; ".join([f"{h['type_habilitation']} (exp. {h['date_expiration']})" for _, h in df_habs.iterrows()]) or "Aucune habilitation enregistrée"
 
                         prompt = f"""
@@ -869,7 +946,7 @@ if onglet == "❤️ Portefeuille Bénéficiaires":
     tab_liste_b, tab_ajout_b = st.tabs(["📋 Bénéficiaires suivis", "➕ Ajouter un bénéficiaire"])
 
     with tab_liste_b:
-        df_b = charger_df("SELECT * FROM beneficiaires ORDER BY nom")
+        df_b = charger_df("SELECT * FROM beneficiaires WHERE structure_id = ? ORDER BY nom", (st.session_state["structure_id"],))
         st.metric("Bénéficiaires suivis", len(df_b[df_b["statut"] == "Actif"]) if not df_b.empty else 0)
 
         if df_b.empty:
@@ -899,12 +976,12 @@ if onglet == "❤️ Portefeuille Bénéficiaires":
                     with col_x:
                         nouveau_statut_b = st.selectbox("Statut", ["Actif", "Inactif"], index=0 if row["statut"] == "Actif" else 1, key=f"statut_b_{row['id']}")
                         if st.button("Mettre à jour le statut", key=f"maj_b_{row['id']}"):
-                            executer("UPDATE beneficiaires SET statut = ? WHERE id = ?", (nouveau_statut_b, row["id"]))
+                            executer("UPDATE beneficiaires SET statut = ? WHERE id = ? AND structure_id = ?", (nouveau_statut_b, row["id"], st.session_state["structure_id"]))
                             st.success("Statut mis à jour.")
                             st.rerun()
                     with col_y:
                         if st.button("🗑️ Supprimer ce bénéficiaire", key=f"del_b_{row['id']}"):
-                            executer("DELETE FROM beneficiaires WHERE id = ?", (row["id"],))
+                            executer("DELETE FROM beneficiaires WHERE id = ? AND structure_id = ?", (row["id"], st.session_state["structure_id"]))
                             st.warning("Bénéficiaire supprimé.")
                             st.rerun()
 
@@ -928,9 +1005,9 @@ if onglet == "❤️ Portefeuille Bénéficiaires":
             submit_b = st.form_submit_button("Ajouter le bénéficiaire")
             if submit_b and nom_b and prenom_b:
                 executer(
-                    """INSERT INTO beneficiaires (nom, prenom, adresse, telephone, niveau_dependance, pathologies, gestes_techniques, besoins_horaires, referent_famille, notes, statut, date_creation)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Actif', ?)""",
-                    (nom_b, prenom_b, adresse_b, telephone_b, niveau_dep, pathologies, gestes, horaires, referent, notes_b, datetime.date.today().isoformat())
+                    """INSERT INTO beneficiaires (structure_id, nom, prenom, adresse, telephone, niveau_dependance, pathologies, gestes_techniques, besoins_horaires, referent_famille, notes, statut, date_creation)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Actif', ?)""",
+                    (st.session_state["structure_id"], nom_b, prenom_b, adresse_b, telephone_b, niveau_dep, pathologies, gestes, horaires, referent, notes_b, datetime.date.today().isoformat())
                 )
                 st.success(f"{prenom_b} {nom_b} ajouté(e) au portefeuille.")
                 st.rerun()
@@ -942,8 +1019,8 @@ if onglet == "❤️ Portefeuille Bénéficiaires":
 if onglet == "📝 Documents & Transmissions":
     st.caption("Assistant de rédaction de comptes-rendus, fiches de liaison et documents professionnels — à relire avant diffusion.")
 
-    df_benef2 = charger_df("SELECT * FROM beneficiaires WHERE statut = 'Actif' ORDER BY nom")
-    df_interv2 = charger_df("SELECT * FROM intervenants ORDER BY nom")
+    df_benef2 = charger_df("SELECT * FROM beneficiaires WHERE statut = 'Actif' AND structure_id = ? ORDER BY nom", (st.session_state["structure_id"],))
+    df_interv2 = charger_df("SELECT * FROM intervenants WHERE structure_id = ? ORDER BY nom", (st.session_state["structure_id"],))
 
     if df_benef2.empty:
         st.info("Ajoute d'abord un bénéficiaire pour rédiger une transmission.")
@@ -996,9 +1073,9 @@ if onglet == "📝 Documents & Transmissions":
             with col_save:
                 if st.button("💾 Enregistrer dans le dossier bénéficiaire"):
                     executer(
-                        """INSERT INTO documents_transmissions (beneficiaire_id, intervenant_id, date_creation, type_document, contenu)
-                           VALUES (?, ?, ?, ?, ?)""",
-                        (benef_labels2[benef_choisi2], interv_labels2[interv_choisi2], datetime.date.today().isoformat(), type_doc, texte_final)
+                        """INSERT INTO documents_transmissions (structure_id, beneficiaire_id, intervenant_id, date_creation, type_document, contenu)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (st.session_state["structure_id"], benef_labels2[benef_choisi2], interv_labels2[interv_choisi2], datetime.date.today().isoformat(), type_doc, texte_final)
                     )
                     st.success("Document enregistré dans le dossier du bénéficiaire.")
             with col_pdf:
@@ -1014,8 +1091,9 @@ if onglet == "📝 Documents & Transmissions":
             SELECT d.date_creation, d.type_document, b.prenom || ' ' || b.nom as beneficiaire, d.contenu
             FROM documents_transmissions d
             LEFT JOIN beneficiaires b ON d.beneficiaire_id = b.id
+            WHERE d.structure_id = ?
             ORDER BY d.date_creation DESC
-        """)
+        """, (st.session_state["structure_id"],))
         if df_docs.empty:
             st.caption("Aucun document enregistré pour l'instant.")
         else:
@@ -1029,8 +1107,8 @@ if onglet == "📅 Plannings, Tournées & Urgences":
 
     tab_planning, tab_urgence = st.tabs(["📅 Planning", "🚨 Remplacement d'urgence"])
 
-    df_benef3 = charger_df("SELECT * FROM beneficiaires WHERE statut = 'Actif' ORDER BY nom")
-    df_interv3 = charger_df("SELECT * FROM intervenants ORDER BY nom")
+    df_benef3 = charger_df("SELECT * FROM beneficiaires WHERE statut = 'Actif' AND structure_id = ? ORDER BY nom", (st.session_state["structure_id"],))
+    df_interv3 = charger_df("SELECT * FROM intervenants WHERE structure_id = ? ORDER BY nom", (st.session_state["structure_id"],))
 
     with tab_planning:
         st.subheader("Planifier une intervention")
@@ -1061,9 +1139,9 @@ if onglet == "📅 Plannings, Tournées & Urgences":
 
                 if submit_p:
                     executer(
-                        """INSERT INTO interventions (beneficiaire_id, intervenant_id, date_intervention, heure_debut, heure_fin, type_intervention, statut, notes)
-                           VALUES (?, ?, ?, ?, ?, ?, 'Planifié', ?)""",
-                        (benef_labels3[benef_p], interv_labels3[interv_p], date_p.isoformat(), heure_debut_p.strftime("%H:%M"), heure_fin_p.strftime("%H:%M"), type_interv_p, notes_p)
+                        """INSERT INTO interventions (structure_id, beneficiaire_id, intervenant_id, date_intervention, heure_debut, heure_fin, type_intervention, statut, notes)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, 'Planifié', ?)""",
+                        (st.session_state["structure_id"], benef_labels3[benef_p], interv_labels3[interv_p], date_p.isoformat(), heure_debut_p.strftime("%H:%M"), heure_fin_p.strftime("%H:%M"), type_interv_p, notes_p)
                     )
                     st.success("Intervention planifiée.")
                     st.rerun()
@@ -1076,9 +1154,9 @@ if onglet == "📅 Plannings, Tournées & Urgences":
             FROM interventions i
             LEFT JOIN beneficiaires b ON i.beneficiaire_id = b.id
             LEFT JOIN intervenants v ON i.intervenant_id = v.id
-            WHERE i.date_intervention >= ?
+            WHERE i.date_intervention >= ? AND i.structure_id = ?
             ORDER BY i.date_intervention, i.heure_debut
-        """, (datetime.date.today().isoformat(),))
+        """, (datetime.date.today().isoformat(), st.session_state["structure_id"]))
 
         if df_plan.empty:
             st.caption("Aucune intervention planifiée à venir.")
@@ -1096,7 +1174,7 @@ if onglet == "📅 Plannings, Tournées & Urgences":
                 with col_action:
                     if row["statut"] not in ["Urgence à pourvoir", "Annulé"]:
                         if st.button("🚨 Absence", key=f"absence_{row['id']}"):
-                            executer("UPDATE interventions SET statut = 'Urgence à pourvoir' WHERE id = ?", (row["id"],))
+                            executer("UPDATE interventions SET statut = 'Urgence à pourvoir' WHERE id = ? AND structure_id = ?", (row["id"], st.session_state["structure_id"]))
                             st.rerun()
 
     with tab_urgence:
@@ -1104,12 +1182,12 @@ if onglet == "📅 Plannings, Tournées & Urgences":
         df_urgences = charger_df("""
             SELECT i.id, i.date_intervention, i.heure_debut, i.heure_fin, i.type_intervention,
                    b.id as beneficiaire_id, b.prenom || ' ' || b.nom as beneficiaire,
-                   b.pathologies, b.gestes_techniques, b.zone_geo_dummy
+                   b.pathologies, b.gestes_techniques
             FROM interventions i
             LEFT JOIN beneficiaires b ON i.beneficiaire_id = b.id
-            WHERE i.statut = 'Urgence à pourvoir'
+            WHERE i.statut = 'Urgence à pourvoir' AND i.structure_id = ?
             ORDER BY i.date_intervention, i.heure_debut
-        """.replace(", b.zone_geo_dummy", ""))
+        """, (st.session_state["structure_id"],))
 
         if df_urgences.empty:
             st.success("✅ Aucune urgence en cours.")
@@ -1123,7 +1201,7 @@ if onglet == "📅 Plannings, Tournées & Urgences":
                 """, unsafe_allow_html=True)
 
                 if st.button(f"🔎 Trouver un remplaçant disponible", key=f"find_{urg['id']}"):
-                    df_dispo = charger_df("SELECT * FROM intervenants WHERE statut_dispo = 'Disponible'")
+                    df_dispo = charger_df("SELECT * FROM intervenants WHERE statut_dispo = 'Disponible' AND structure_id = ?", (st.session_state["structure_id"],))
                     if df_dispo.empty:
                         st.warning("Aucun intervenant disponible actuellement dans le vivier.")
                     else:
@@ -1150,7 +1228,7 @@ if onglet == "📅 Plannings, Tournées & Urgences":
                                             st.error(msg)
 
                 if st.button("✅ Marquer comme pourvue", key=f"resolu_{urg['id']}"):
-                    executer("UPDATE interventions SET statut = 'Planifié' WHERE id = ?", (urg["id"],))
+                    executer("UPDATE interventions SET statut = 'Planifié' WHERE id = ? AND structure_id = ?", (urg["id"], st.session_state["structure_id"]))
                     st.rerun()
 
 
@@ -1161,7 +1239,7 @@ if onglet == "✅ Conformité & Suivi":
 
     tab_suivi, tab_ajout_hab = st.tabs(["📋 Suivi des habilitations", "➕ Ajouter une habilitation"])
 
-    df_interv4 = charger_df("SELECT * FROM intervenants ORDER BY nom")
+    df_interv4 = charger_df("SELECT * FROM intervenants WHERE structure_id = ? ORDER BY nom", (st.session_state["structure_id"],))
 
     with tab_suivi:
         aujourdhui = datetime.date.today()
@@ -1172,8 +1250,9 @@ if onglet == "✅ Conformité & Suivi":
                    v.prenom || ' ' || v.nom as intervenant, v.id as intervenant_id
             FROM habilitations h
             LEFT JOIN intervenants v ON h.intervenant_id = v.id
+            WHERE h.structure_id = ?
             ORDER BY h.date_expiration
-        """)
+        """, (st.session_state["structure_id"],))
 
         if df_habs_all.empty:
             st.info("Aucune habilitation enregistrée pour l'instant.")
@@ -1225,8 +1304,8 @@ if onglet == "✅ Conformité & Suivi":
 
                 if submit_hab:
                     executer(
-                        "INSERT INTO habilitations (intervenant_id, type_habilitation, date_obtention, date_expiration) VALUES (?, ?, ?, ?)",
-                        (interv_labels4[interv_hab], type_hab, date_obt.isoformat(), date_exp.isoformat())
+                        "INSERT INTO habilitations (structure_id, intervenant_id, type_habilitation, date_obtention, date_expiration) VALUES (?, ?, ?, ?, ?)",
+                        (st.session_state["structure_id"], interv_labels4[interv_hab], type_hab, date_obt.isoformat(), date_exp.isoformat())
                     )
                     st.success("Habilitation ajoutée.")
                     st.rerun()
@@ -1235,7 +1314,9 @@ if onglet == "✅ Conformité & Suivi":
 # ============================================================
 #  ONGLET 7 : ADMINISTRATION & PARAMÈTRES
 # ============================================================
-if onglet == "🛠️ Administration & Paramètres":
+if onglet == "👤 Mon Profil":
+
+    st.caption(f"Structure : **{st.session_state.get('structure_nom', 'Non assignée')}**")
 
     st.subheader("📧 Ma boîte mail (sollicitations & réception)")
     with st.form("form_mail_config"):
@@ -1253,14 +1334,43 @@ if onglet == "🛠️ Administration & Paramètres":
             st.session_state["mail_config"] = {"email": mail_e, "password": mail_p or cfg_actuelle.get("password", ""), "imap": mail_i}
             st.success("Boîte mail enregistrée.")
 
+
+# ============================================================
+#  ONGLET ADMIN-ONLY : ADMINISTRATION
+# ============================================================
+if onglet == "🛠️ Administration" and st.session_state.get("is_admin", False):
+
+    st.subheader("🏢 Vue par structure (toutes structures confondues)")
+    df_structures_vue = charger_df("""
+        SELECT s.nom as structure,
+               (SELECT COUNT(*) FROM beneficiaires WHERE structure_id = s.id) as beneficiaires,
+               (SELECT COUNT(*) FROM intervenants WHERE structure_id = s.id) as intervenants,
+               (SELECT COUNT(*) FROM interventions WHERE structure_id = s.id) as interventions,
+               (SELECT COUNT(*) FROM documents_transmissions WHERE structure_id = s.id) as documents
+        FROM structures s
+        ORDER BY s.nom
+    """)
+    st.dataframe(df_structures_vue, use_container_width=True, hide_index=True)
+
     st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
 
-    st.subheader("🗄️ État de la base de données")
+    st.subheader("👥 Utilisateurs & accès")
+    df_users_admin = charger_df("""
+        SELECT u.email, s.nom as structure, u.statut_abonnement, u.date_fin_essai, u.nb_requetes_ia, u.quota_max
+        FROM utilisateurs u
+        LEFT JOIN structures s ON u.structure_id = s.id
+        ORDER BY s.nom
+    """)
+    st.dataframe(df_users_admin, use_container_width=True, hide_index=True)
+
+    st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
+
+    st.subheader("🗄️ État global de la base de données")
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Bénéficiaires", len(charger_df("SELECT id FROM beneficiaires")))
-    col2.metric("Intervenants", len(charger_df("SELECT id FROM intervenants")))
-    col3.metric("Interventions", len(charger_df("SELECT id FROM interventions")))
-    col4.metric("Documents", len(charger_df("SELECT id FROM documents_transmissions")))
+    col1.metric("Bénéficiaires (total)", len(charger_df("SELECT id FROM beneficiaires")))
+    col2.metric("Intervenants (total)", len(charger_df("SELECT id FROM intervenants")))
+    col3.metric("Interventions (total)", len(charger_df("SELECT id FROM interventions")))
+    col4.metric("Documents (total)", len(charger_df("SELECT id FROM documents_transmissions")))
 
     st.caption(f"Base de données locale : `{DB_NAME}` (SQLite, mode WAL). Pensez à ne jamais versionner ce fichier sur GitHub (voir .gitignore).")
 
@@ -1269,3 +1379,4 @@ if onglet == "🛠️ Administration & Paramètres":
     st.write("- Mots de passe utilisateurs hachés avec **bcrypt**.")
     st.write("- Clé API Gemini chargée uniquement via les secrets Streamlit (jamais en dur dans le code).")
     st.write(f"- Statut clé Gemini : {'✅ Configurée' if IA_DISPONIBLE else '❌ Non configurée'}")
+    st.write("- Cloisonnement des données actif : chaque structure ne voit que ses propres bénéficiaires, intervenants, plannings et documents.")
