@@ -66,6 +66,17 @@ CUSTOM_CSS = """
         letter-spacing: 0.3px;
     }
 
+    /* Correction globale pour rendre tous les textes et labels bien visibles */
+    p, span, label, .stMarkdown, div[data-baseweb="select"] span {
+        color: #e6ecf2 !important;
+    }
+
+    /* Visibilité spécifique pour les labels de filtres et selectbox */
+    .stSelectbox label, .stTextInput label, .stNumberInput label, .stDateInput label {
+        color: #b8c2cc !important;
+        font-weight: 500;
+    }
+
     .oc-badge {
         display: inline-block;
         padding: 4px 14px;
