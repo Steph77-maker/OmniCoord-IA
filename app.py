@@ -1336,7 +1336,7 @@ if onglet == "👤 Mon Profil":
 
 
 # ============================================================
-#  ONGLET ADMIN-ONLY : ADMINISTRATION
+#   ONGLET ADMIN-ONLY : ADMINISTRATION
 # ============================================================
 if onglet == "🛠️ Administration" and st.session_state.get("is_admin", False):
 
@@ -1362,6 +1362,61 @@ if onglet == "🛠️ Administration" and st.session_state.get("is_admin", False
         ORDER BY s.nom
     """)
     st.dataframe(df_users_admin, use_container_width=True, hide_index=True)
+
+    # ============================================================
+    # GESTION / SUPPRESSION DES UTILISATEURS & STRUCTURES
+    # ============================================================
+    st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
+    st.subheader("🗑️ Gestion et suppression d'un accès")
+
+    df_users_del = charger_df("SELECT id, email FROM utilisateurs WHERE email != 'admin@omnicoord.fr'")
+    
+    if not df_users_del.empty:
+        user_to_delete = st.selectbox(
+            "Sélectionner l'utilisateur à supprimer", 
+            options=df_users_del["email"].tolist(),
+            key="select_user_to_delete"
+        )
+        
+        confirm_del = st.checkbox("Je confirme vouloir supprimer cet accès et toutes les données associées à cette structure")
+        
+        if st.button("🗑️ Supprimer définitivement l'utilisateur"):
+            if confirm_del:
+                try:
+                    conn = sqlite3.connect(DB_NAME)
+                    cursor = conn.cursor()
+                    
+                    cursor.execute("SELECT structure_id FROM utilisateurs WHERE email = ?", (user_to_delete,))
+                    res = cursor.fetchone()
+                    
+                    if res:
+                        struct_id = res[0]
+                        
+                        cursor.execute("DELETE FROM utilisateurs WHERE email = ?", (user_to_delete,))
+                        
+                        cursor.execute("SELECT COUNT(*) FROM utilisateurs WHERE structure_id = ?", (struct_id,))
+                        remaining_users = cursor.fetchone()[0]
+                        
+                        if remaining_users == 0:
+                            cursor.execute("DELETE FROM beneficiaires WHERE structure_id = ?", (struct_id,))
+                            cursor.execute("DELETE FROM intervenants WHERE structure_id = ?", (struct_id,))
+                            cursor.execute("DELETE FROM interventions WHERE structure_id = ?", (struct_id,))
+                            cursor.execute("DELETE FROM documents_transmissions WHERE structure_id = ?", (struct_id,))
+                            cursor.execute("DELETE FROM structures WHERE id = ?", (struct_id,))
+                        
+                        conn.commit()
+                        conn.close()
+                        st.success(f"L'accès pour {user_to_delete} a été supprimé avec succès !")
+                        time.sleep(1.5)
+                        st.rerun()
+                    else:
+                        st.error("Utilisateur introuvable.")
+                except Exception as e:
+                    st.error(f"Erreur lors de la suppression : {e}")
+            else:
+                st.warning("Veuillez cocher la case de confirmation pour procéder à la suppression.")
+    else:
+        st.info("Aucun autre utilisateur à supprimer pour le moment.")
 
     st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
 
