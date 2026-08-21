@@ -34,7 +34,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- CHARTE GRAPHIQUE : BLEU MÉDICAL / NUIT PROFOND + ACIER BROSSÉ (CORRIGÉ LISIBILITÉ) ---
+# --- CHARTE GRAPHIQUE : BLEU MÉDICAL / NUIT PROFOND + ACIER BROSSÉ ---
 CUSTOM_CSS = """
 <style>
     :root {
@@ -59,8 +59,7 @@ CUSTOM_CSS = """
         background: linear-gradient(180deg, #0c1f33 0%, #0a1929 100%);
         border-right: 1px solid rgba(137, 150, 163, 0.25);
     }
-    
-    /* Forcer la lisibilité de tous les textes généraux, paragraphes et labels */
+
     p, span, label, .stMarkdown, div[data-baseweb="select"] span {
         color: #f2f5f8 !important;
     }
@@ -88,17 +87,9 @@ CUSTOM_CSS = """
         color: #f2f5f8 !important;
     }
 
-    .oc-card-alert {
-        border-left: 4px solid var(--oc-alert) !important;
-    }
-
-    .oc-card-warning {
-        border-left: 4px solid var(--oc-warning) !important;
-    }
-
-    .oc-card-ok {
-        border-left: 4px solid var(--oc-success) !important;
-    }
+    .oc-card-alert { border-left: 4px solid var(--oc-alert) !important; }
+    .oc-card-warning { border-left: 4px solid var(--oc-warning) !important; }
+    .oc-card-ok { border-left: 4px solid var(--oc-success) !important; }
 
     .oc-metal-divider {
         height: 2px;
@@ -124,21 +115,19 @@ CUSTOM_CSS = """
     div[data-testid="stMetricValue"] {
         color: var(--oc-medical-blue-soft) !important;
     }
-    
-    /* Correction des champs de saisie (inputs, selectbox, text areas) pour texte bien blanc sur fond sombre */
+
     input, textarea, select {
         color: #ffffff !important;
     }
-    
+
     div[data-baseweb="input"] {
         background-color: rgba(19, 47, 76, 0.6) !important;
         color: #ffffff !important;
     }
 
-    /* Correction spécifique pour les libellés et champs de la page de connexion */
     div[data-testid="stTextInput"] label p,
     div[data-testid="stPasswordInput"] label p,
-    .stTextInput label, 
+    .stTextInput label,
     .stPasswordInput label {
         color: #f2f5f8 !important;
         font-weight: 600 !important;
@@ -148,6 +137,99 @@ CUSTOM_CSS = """
         color: #ffffff !important;
         background-color: rgba(13, 33, 56, 0.8) !important;
     }
+
+    /* Planning hebdomadaire */
+    .planning-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+        margin-top: 10px;
+    }
+    .planning-table th {
+        background: linear-gradient(135deg, #1a3f6f 0%, #0f2942 100%);
+        color: #f2f5f8;
+        padding: 10px 8px;
+        text-align: center;
+        border: 1px solid rgba(137,150,163,0.3);
+        font-weight: 700;
+        letter-spacing: 0.5px;
+    }
+    .planning-table th.col-intervenant {
+        background: linear-gradient(135deg, #0c1f33 0%, #0a1929 100%);
+        text-align: left;
+        padding-left: 12px;
+        min-width: 140px;
+    }
+    .planning-table td {
+        border: 1px solid rgba(137,150,163,0.2);
+        padding: 6px 4px;
+        vertical-align: top;
+        min-width: 110px;
+        min-height: 50px;
+        background: rgba(10, 25, 41, 0.4);
+    }
+    .planning-table td.col-intervenant {
+        background: rgba(12, 31, 51, 0.7);
+        color: #e6ecf2;
+        font-weight: 600;
+        padding: 8px 12px;
+        vertical-align: middle;
+    }
+    .planning-cell {
+        background: linear-gradient(135deg, #132f4c 0%, #0f2438 100%);
+        border-radius: 6px;
+        padding: 5px 7px;
+        margin: 2px;
+        font-size: 12px;
+        border-left: 3px solid #2f7cf6;
+        color: #f2f5f8;
+    }
+    .planning-cell.urgence { border-left-color: #e0554f !important; }
+    .planning-cell.realise { border-left-color: #3fae74 !important; }
+    .planning-cell.annule { border-left-color: #8996a3 !important; opacity: 0.6; }
+    .planning-empty { color: rgba(137,150,163,0.3); font-size: 12px; text-align: center; padding: 10px 0; }
+
+    /* Alertes dashboard */
+    .alert-box {
+        border-radius: 10px;
+        padding: 14px 18px;
+        margin-bottom: 10px;
+        display: flex;
+        align-items: flex-start;
+        gap: 12px;
+    }
+    .alert-box-rouge {
+        background: rgba(224, 85, 79, 0.12);
+        border: 1px solid rgba(224, 85, 79, 0.45);
+        border-left: 4px solid #e0554f;
+    }
+    .alert-box-orange {
+        background: rgba(217, 154, 61, 0.12);
+        border: 1px solid rgba(217, 154, 61, 0.40);
+        border-left: 4px solid #d99a3d;
+    }
+    .alert-box-bleu {
+        background: rgba(47, 124, 246, 0.10);
+        border: 1px solid rgba(47, 124, 246, 0.35);
+        border-left: 4px solid #2f7cf6;
+    }
+    .alert-icon { font-size: 20px; margin-top: 2px; flex-shrink: 0; }
+    .alert-content { flex: 1; }
+    .alert-title { font-weight: 700; color: #f2f5f8; font-size: 14px; }
+    .alert-detail { color: #b8c2cc; font-size: 13px; margin-top: 2px; }
+
+    /* Fiche bénéficiaire */
+    .fiche-section {
+        background: linear-gradient(135deg, #132f4c 0%, #0f2438 100%);
+        border: 1px solid rgba(137,150,163,0.2);
+        border-radius: 10px;
+        padding: 16px 18px;
+        margin-bottom: 12px;
+    }
+    .fiche-section h4 { color: #4c8dfa !important; margin-bottom: 10px; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; }
+    .fiche-row { display: flex; gap: 8px; margin-bottom: 6px; }
+    .fiche-label { color: #8996a3; font-size: 13px; min-width: 140px; flex-shrink: 0; }
+    .fiche-value { color: #f2f5f8; font-size: 13px; }
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -155,13 +237,10 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 # --- SÉCURITÉ : HACHAGE DES MOTS DE PASSE (bcrypt) ---
 def hacher_mdp(mot_de_passe_clair):
-    """Retourne le hash bcrypt (str) d'un mot de passe en clair."""
     return bcrypt.hashpw(mot_de_passe_clair.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
 def verifier_mdp(mot_de_passe_saisi, valeur_stockee):
-    """Vérifie un mot de passe saisi contre la valeur stockée (hash bcrypt ou, pour
-    compatibilité de migration, ancien texte en clair)."""
     if not valeur_stockee:
         return False
     try:
@@ -263,7 +342,7 @@ def creer_pdf_fiche_intervenant(nom, competences, habilitations, details):
     return pdf.output(dest="S")
 
 
-# --- ENVOI D'EMAIL (alertes urgences / demandes de remplacement) ---
+# --- ENVOI D'EMAIL ---
 def envoyer_email_intervenant(to_email, sujet, corps_message, email_user, pwd_user, smtp_server="smtp.gmail.com", smtp_port=587):
     try:
         msg = MIMEMultipart()
@@ -281,7 +360,112 @@ def envoyer_email_intervenant(to_email, sujet, corps_message, email_user, pwd_us
         return False, f"Erreur d'envoi : {e}"
 
 
-# --- CALCUL DE PROXIMITÉ SIMPLIFIÉ (distance à vol d'oiseau si coordonnées fournies) ---
+# ============================================================
+#  AGENT IA — AUTOMATISATION DES REMPLACEMENTS D'URGENCE
+# ============================================================
+def classer_candidats_urgence(urg_row, df_dispo, structure_id):
+    resultats = []
+    for _, interv in df_dispo.iterrows():
+        df_habs = charger_df(
+            "SELECT * FROM habilitations WHERE intervenant_id = ? AND structure_id = ?",
+            (int(interv["id"]), structure_id)
+        )
+        habs_txt = "; ".join(
+            [f"{h['type_habilitation']} (exp. {h['date_expiration']})" for _, h in df_habs.iterrows()]
+        ) or "Aucune habilitation enregistrée"
+
+        prompt = f"""
+        Tu es un coordinateur expert en aide à domicile (SAAD/SSIAD) chargé de trouver en urgence
+        un remplaçant pour une intervention non pourvue.
+
+        CONSIGNES :
+        1. Évalue la pertinence de ce candidat pour CE remplacement précis, en te basant sur :
+           - la couverture des habilitations nécessaires au type d'intervention ;
+           - la proximité géographique déclarée (zone_geo) avec le secteur du bénéficiaire ;
+           - la compatibilité de ses disponibilités déclarées avec le créneau à pourvoir.
+        2. N'invente jamais une donnée absente.
+
+        Renvoie STRICTEMENT un objet JSON avec les clés :
+        - 'score_global': entier 0-100
+        - 'alerte_habilitation': texte court si une habilitation obligatoire semble manquante, sinon chaîne vide
+        - 'justification': synthèse en une phrase
+
+        INTERVENTION À POURVOIR :
+        Date/heure : {urg_row['date_intervention']} de {urg_row['heure_debut']} à {urg_row['heure_fin']}
+        Type d'intervention : {urg_row['type_intervention']}
+        Bénéficiaire — besoins : {urg_row.get('gestes_techniques', '') or 'Non renseigné'}
+
+        PROFIL INTERVENANT CANDIDAT :
+        Compétences déclarées : {interv['competences']}
+        Zone géographique : {interv['zone_geo']}
+        Disponibilités déclarées : {interv['disponibilites']}
+        Habilitations : {habs_txt}
+        """
+        try:
+            reponse = model.generate_content(prompt)
+            txt = reponse.text.strip().replace("```json", "").replace("```", "").strip()
+            data = json.loads(txt)
+        except Exception:
+            data = {"score_global": 0, "alerte_habilitation": "", "justification": "Évaluation IA indisponible pour ce candidat."}
+
+        data["intervenant_id"] = int(interv["id"])
+        data["intervenant_nom"] = f"{interv['prenom']} {interv['nom']}"
+        data["intervenant_email"] = interv["email"]
+        data["intervenant_zone"] = interv["zone_geo"]
+        resultats.append(data)
+
+    return sorted(resultats, key=lambda x: int(x.get("score_global", 0)), reverse=True)
+
+
+def prochain_candidat_non_sollicite(intervention_id, classement, structure_id):
+    df_deja = charger_df(
+        "SELECT intervenant_id FROM sollicitations_urgence WHERE intervention_id = ? AND structure_id = ? AND statut != 'Accepté'",
+        (intervention_id, structure_id)
+    )
+    ids_exclus = set(df_deja["intervenant_id"].tolist()) if not df_deja.empty else set()
+    for candidat in classement:
+        if candidat["intervenant_id"] not in ids_exclus:
+            return candidat
+    return None
+
+
+def solliciter_candidat_urgence(urg_row, candidat, structure_id):
+    cfg = st.session_state.get("mail_config", {})
+    if not candidat.get("intervenant_email") or not cfg.get("email"):
+        return False, "Impossible d'envoyer : email du candidat ou boîte mail de la structure non configurés."
+
+    sujet = f"Remplacement urgent le {urg_row['date_intervention']}"
+    corps = (
+        f"Bonjour,\n\n"
+        f"Une intervention est à pourvoir en urgence le {urg_row['date_intervention']} "
+        f"de {urg_row['heure_debut']} à {urg_row['heure_fin']} ({urg_row['type_intervention']}).\n"
+        f"Merci de nous confirmer votre disponibilité au plus vite en répondant à ce message.\n\nMerci."
+    )
+    ok, msg = envoyer_email_intervenant(candidat["intervenant_email"], sujet, corps, cfg["email"], cfg["password"])
+    if ok:
+        executer(
+            """INSERT INTO sollicitations_urgence
+               (structure_id, intervention_id, intervenant_id, score_global, justification, alerte_habilitation, date_envoi, statut)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'En attente')""",
+            (structure_id, int(urg_row["id"]), candidat["intervenant_id"], int(candidat.get("score_global", 0)),
+             candidat.get("justification", ""), candidat.get("alerte_habilitation", ""), datetime.datetime.now().isoformat())
+        )
+    return ok, msg
+
+
+def traiter_reponse_sollicitation(sollicitation_id, intervention_id, intervenant_id, reponse, structure_id):
+    executer(
+        "UPDATE sollicitations_urgence SET statut = ? WHERE id = ? AND structure_id = ?",
+        (reponse, sollicitation_id, structure_id)
+    )
+    if reponse == "Accepté":
+        executer(
+            "UPDATE interventions SET intervenant_id = ?, statut = 'Planifié' WHERE id = ? AND structure_id = ?",
+            (intervenant_id, intervention_id, structure_id)
+        )
+
+
+# --- CALCUL DE PROXIMITÉ ---
 def distance_km(lat1, lon1, lat2, lon2):
     try:
         R = 6371
@@ -361,7 +545,6 @@ def initialiser_auth_db():
 
 
 def get_or_create_structure(nom_structure):
-    """Retourne l'id de la structure portant ce nom, en la créant si besoin."""
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     c.execute("SELECT id FROM structures WHERE nom = ?", (nom_structure,))
@@ -462,7 +645,7 @@ initialiser_auth_db()
 if not check_password():
     st.stop()
 
-# --- CONFIGURATION IA (clé indépendante de tout autre projet) ---
+# --- CONFIGURATION IA ---
 try:
     gemini_key = st.secrets["GEMINI_API_KEY"]
     genai.configure(api_key=gemini_key)
@@ -474,7 +657,7 @@ except Exception:
 
 
 # ============================================================
-#  TABLES MÉTIER : BÉNÉFICIAIRES, INTERVENANTS, HABILITATIONS, PLANNINGS
+#  TABLES MÉTIER
 # ============================================================
 def initialiser_tables_metier():
     conn = sqlite3.connect(DB_NAME)
@@ -492,22 +675,38 @@ def initialiser_tables_metier():
             referent_famille TEXT,
             notes TEXT,
             statut TEXT DEFAULT 'Actif',
-            date_creation TEXT
+            date_creation TEXT,
+            contact_urgence_nom TEXT DEFAULT '',
+            contact_urgence_tel TEXT DEFAULT '',
+            besoins_recurrents TEXT DEFAULT '',
+            intervenant_attitré_id INTEGER DEFAULT NULL
         )
     """)
+
+    # Migration : ajout des colonnes étendues si elles n'existent pas encore
+    for col_def in [
+        ("contact_urgence_nom", "TEXT DEFAULT ''"),
+        ("contact_urgence_tel", "TEXT DEFAULT ''"),
+        ("besoins_recurrents", "TEXT DEFAULT ''"),
+        ("intervenant_attitré_id", "INTEGER DEFAULT NULL"),
+    ]:
+        try:
+            c.execute(f"ALTER TABLE beneficiaires ADD COLUMN {col_def[0]} {col_def[1]}")
+        except Exception:
+            pass
 
     c.execute("""
         CREATE TABLE IF NOT EXISTS intervenants (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             structure_id INTEGER,
             nom TEXT, prenom TEXT, telephone TEXT, email TEXT,
-            type_statut TEXT,       -- Interne / Vivier candidat / Externe ponctuel
+            type_statut TEXT,
             competences TEXT,
-            experience_texte TEXT,  -- texte libre du parcours, pour matching IA compétences transférables
+            experience_texte TEXT,
             zone_geo TEXT,
             disponibilites TEXT,
-            statut_dispo TEXT DEFAULT 'Disponible',  -- Disponible / En mission / Indisponible
-            source TEXT,             -- Vivier interne / CVthèque / Annonce / Réseau / Cooptation
+            statut_dispo TEXT DEFAULT 'Disponible',
+            source TEXT,
             date_ajout TEXT
         )
     """)
@@ -517,7 +716,7 @@ def initialiser_tables_metier():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             structure_id INTEGER,
             intervenant_id INTEGER,
-            type_habilitation TEXT,   -- Diplôme AES, DEAES, PSC1, Permis B, Visite médicale, etc.
+            type_habilitation TEXT,
             date_obtention TEXT,
             date_expiration TEXT,
             FOREIGN KEY(intervenant_id) REFERENCES intervenants(id)
@@ -534,7 +733,7 @@ def initialiser_tables_metier():
             heure_debut TEXT,
             heure_fin TEXT,
             type_intervention TEXT,
-            statut TEXT DEFAULT 'Planifié',  -- Planifié / Réalisé / Urgence à pourvoir / Annulé
+            statut TEXT DEFAULT 'Planifié',
             notes TEXT,
             FOREIGN KEY(beneficiaire_id) REFERENCES beneficiaires(id),
             FOREIGN KEY(intervenant_id) REFERENCES intervenants(id)
@@ -551,6 +750,22 @@ def initialiser_tables_metier():
             type_document TEXT,
             contenu TEXT,
             FOREIGN KEY(beneficiaire_id) REFERENCES beneficiaires(id),
+            FOREIGN KEY(intervenant_id) REFERENCES intervenants(id)
+        )
+    """)
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS sollicitations_urgence (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            structure_id INTEGER,
+            intervention_id INTEGER,
+            intervenant_id INTEGER,
+            score_global INTEGER,
+            justification TEXT,
+            alerte_habilitation TEXT,
+            date_envoi TEXT,
+            statut TEXT DEFAULT 'En attente',
+            FOREIGN KEY(intervention_id) REFERENCES interventions(id),
             FOREIGN KEY(intervenant_id) REFERENCES intervenants(id)
         )
     """)
@@ -580,7 +795,7 @@ def executer(requete, params=()):
 
 
 # ============================================================
-#  SIDEBAR — COMPTE, IA, ADMIN
+#  SIDEBAR
 # ============================================================
 st.sidebar.markdown("### ⚙️ Mon Compte")
 st.sidebar.caption(f"Connecté : {st.session_state.get('user_email', '')}")
@@ -667,6 +882,7 @@ st.sidebar.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=Tr
 st.sidebar.markdown("### 📋 Menu principal")
 
 _liste_onglets = [
+    "🏠 Tableau de bord",
     "🧑‍🤝‍🧑 Vivier & Sourcing Direct",
     "🎯 Matching IA",
     "❤️ Portefeuille Bénéficiaires",
@@ -682,6 +898,155 @@ onglet = st.sidebar.radio("Navigation", _liste_onglets, label_visibility="collap
 
 st.markdown(f"# {onglet}")
 st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
+
+
+# ============================================================
+#  ONGLET 0 : TABLEAU DE BORD — ALERTES CENTRALISÉES
+# ============================================================
+if onglet == "🏠 Tableau de bord":
+
+    sid = st.session_state["structure_id"]
+    aujourdhui = datetime.date.today()
+    seuil_60j = aujourdhui + datetime.timedelta(days=60)
+
+    # --- Métriques globales ---
+    col1, col2, col3, col4 = st.columns(4)
+    nb_benef = len(charger_df("SELECT id FROM beneficiaires WHERE statut='Actif' AND structure_id=?", (sid,)))
+    nb_interv = len(charger_df("SELECT id FROM intervenants WHERE statut_dispo='Disponible' AND structure_id=?", (sid,)))
+    nb_plan_semaine = len(charger_df(
+        "SELECT id FROM interventions WHERE structure_id=? AND date_intervention BETWEEN ? AND ? AND statut != 'Annulé'",
+        (sid, aujourdhui.isoformat(), (aujourdhui + datetime.timedelta(days=7)).isoformat())
+    ))
+    nb_urgences = len(charger_df("SELECT id FROM interventions WHERE statut='Urgence à pourvoir' AND structure_id=?", (sid,)))
+
+    col1.metric("👥 Bénéficiaires actifs", nb_benef)
+    col2.metric("🧑‍⚕️ Intervenants dispo", nb_interv)
+    col3.metric("📅 Interventions (7j)", nb_plan_semaine)
+    col4.metric("🚨 Urgences en cours", nb_urgences, delta=f"-{nb_urgences}" if nb_urgences > 0 else None, delta_color="inverse")
+
+    st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
+
+    # --- Alertes ---
+    st.subheader("🔔 Alertes & points d'attention")
+
+    alertes_rouges = []
+    alertes_oranges = []
+    alertes_bleues = []
+
+    # 1. Habilitations expirées
+    df_habs_exp = charger_df("""
+        SELECT h.type_habilitation, h.date_expiration,
+               v.prenom || ' ' || v.nom as intervenant
+        FROM habilitations h
+        LEFT JOIN intervenants v ON h.intervenant_id = v.id
+        WHERE h.structure_id = ? AND h.date_expiration < ?
+        ORDER BY h.date_expiration
+    """, (sid, aujourdhui.isoformat()))
+    for _, h in df_habs_exp.iterrows():
+        alertes_rouges.append(f"🔴 Habilitation <b>{h['type_habilitation']}</b> de <b>{h['intervenant']}</b> expirée depuis le {h['date_expiration']}")
+
+    # 2. Habilitations expirant dans moins de 60 jours
+    df_habs_60 = charger_df("""
+        SELECT h.type_habilitation, h.date_expiration,
+               v.prenom || ' ' || v.nom as intervenant
+        FROM habilitations h
+        LEFT JOIN intervenants v ON h.intervenant_id = v.id
+        WHERE h.structure_id = ? AND h.date_expiration >= ? AND h.date_expiration <= ?
+        ORDER BY h.date_expiration
+    """, (sid, aujourdhui.isoformat(), seuil_60j.isoformat()))
+    for _, h in df_habs_60.iterrows():
+        jours = (datetime.date.fromisoformat(h['date_expiration']) - aujourdhui).days
+        alertes_oranges.append(f"🟠 Habilitation <b>{h['type_habilitation']}</b> de <b>{h['intervenant']}</b> expire dans <b>{jours} jour(s)</b> ({h['date_expiration']})")
+
+    # 3. Interventions non confirmées (statut Urgence à pourvoir)
+    df_urg = charger_df("""
+        SELECT i.date_intervention, i.heure_debut, i.heure_fin, i.type_intervention,
+               b.prenom || ' ' || b.nom as beneficiaire
+        FROM interventions i
+        LEFT JOIN beneficiaires b ON i.beneficiaire_id = b.id
+        WHERE i.statut = 'Urgence à pourvoir' AND i.structure_id = ?
+        ORDER BY i.date_intervention
+    """, (sid,))
+    for _, u in df_urg.iterrows():
+        alertes_rouges.append(f"🚨 Intervention <b>non couverte</b> : {u['date_intervention']} {u['heure_debut']}–{u['heure_fin']} ({u['type_intervention']}) — Bénéficiaire : {u['beneficiaire']}")
+
+    # 4. Bénéficiaires sans intervenant attitré
+    df_sans_attitré = charger_df("""
+        SELECT prenom || ' ' || nom as nom_complet
+        FROM beneficiaires
+        WHERE structure_id = ? AND statut = 'Actif'
+          AND (intervenant_attitré_id IS NULL OR intervenant_attitré_id = 0)
+        ORDER BY nom
+    """, (sid,))
+    for _, b in df_sans_attitré.iterrows():
+        alertes_bleues.append(f"ℹ️ <b>{b['nom_complet']}</b> n'a pas d'intervenant attitré défini")
+
+    total_alertes = len(alertes_rouges) + len(alertes_oranges) + len(alertes_bleues)
+
+    if total_alertes == 0:
+        st.markdown("""
+            <div class="oc-card oc-card-ok">
+                <b>✅ Tout est en ordre !</b> Aucune alerte active pour votre structure.
+            </div>
+        """, unsafe_allow_html=True)
+    else:
+        # Alertes rouges (critiques)
+        if alertes_rouges:
+            with st.expander(f"🔴 Alertes critiques ({len(alertes_rouges)})", expanded=True):
+                for a in alertes_rouges:
+                    st.markdown(f"""
+                        <div class="alert-box alert-box-rouge">
+                            <div class="alert-content"><span class="alert-detail">{a}</span></div>
+                        </div>
+                    """, unsafe_allow_html=True)
+
+        # Alertes oranges (à surveiller)
+        if alertes_oranges:
+            with st.expander(f"🟠 À renouveler prochainement ({len(alertes_oranges)})", expanded=True):
+                for a in alertes_oranges:
+                    st.markdown(f"""
+                        <div class="alert-box alert-box-orange">
+                            <div class="alert-content"><span class="alert-detail">{a}</span></div>
+                        </div>
+                    """, unsafe_allow_html=True)
+
+        # Alertes bleues (informations)
+        if alertes_bleues:
+            with st.expander(f"ℹ️ Points d'attention ({len(alertes_bleues)})"):
+                for a in alertes_bleues:
+                    st.markdown(f"""
+                        <div class="alert-box alert-box-bleu">
+                            <div class="alert-content"><span class="alert-detail">{a}</span></div>
+                        </div>
+                    """, unsafe_allow_html=True)
+
+    st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
+
+    # --- Interventions du jour ---
+    st.subheader(f"📅 Interventions du jour — {aujourdhui.strftime('%A %d %B %Y').capitalize()}")
+    df_jour = charger_df("""
+        SELECT i.heure_debut, i.heure_fin, i.type_intervention, i.statut,
+               b.prenom || ' ' || b.nom as beneficiaire,
+               v.prenom || ' ' || v.nom as intervenant
+        FROM interventions i
+        LEFT JOIN beneficiaires b ON i.beneficiaire_id = b.id
+        LEFT JOIN intervenants v ON i.intervenant_id = v.id
+        WHERE i.date_intervention = ? AND i.structure_id = ?
+        ORDER BY i.heure_debut
+    """, (aujourdhui.isoformat(), sid))
+
+    if df_jour.empty:
+        st.caption("Aucune intervention planifiée aujourd'hui.")
+    else:
+        for _, row in df_jour.iterrows():
+            couleur_p = {"Planifié": "#4c8dfa", "Urgence à pourvoir": "#e0554f", "Réalisé": "#3fae74", "Annulé": "#8996a3"}.get(row["statut"], "#8996a3")
+            st.markdown(f"""
+                <div class="oc-card" style="border-left-color:{couleur_p}; padding:12px 16px;">
+                    <b>{row['heure_debut']} – {row['heure_fin']}</b> · {row['type_intervention']}
+                    <span class="oc-badge" style="background:{couleur_p}; float:right;">{row['statut']}</span><br>
+                    <span style="color:#b8c2cc;">👤 {row['beneficiaire']} &nbsp;•&nbsp; 🧑‍⚕️ {row['intervenant']}</span>
+                </div>
+            """, unsafe_allow_html=True)
 
 
 # ============================================================
@@ -761,7 +1126,7 @@ if onglet == "🧑‍🤝‍🧑 Vivier & Sourcing Direct":
                 type_statut = st.selectbox("Statut", ["Interne", "Vivier candidat", "Externe ponctuel"])
             with col2:
                 competences = st.text_area("Compétences / gestes techniques maîtrisés", placeholder="Ex : toilette, aide au lever, transfert, stimulation cognitive...")
-                experience_texte = st.text_area("Parcours professionnel (texte libre)", placeholder="Décrire le parcours, y compris expériences hors secteur médico-social — utile pour le matching IA sur les compétences transférables.")
+                experience_texte = st.text_area("Parcours professionnel (texte libre)", placeholder="Décrire le parcours, y compris expériences hors secteur médico-social — utile pour le matching IA.")
                 zone_geo = st.text_input("Zone géographique / secteur d'intervention")
                 disponibilites = st.text_input("Disponibilités (ex : lun-ven matin, weekends...)")
                 source = st.selectbox("Source de recrutement", ["Vivier interne", "CVthèque", "Annonce", "Réseau / cooptation", "Candidature spontanée"])
@@ -803,7 +1168,7 @@ if onglet == "🧑‍🤝‍🧑 Vivier & Sourcing Direct":
                     <a href="https://www.facebook.com/search/groups/?q={requete_url}+emploi" target="_blank">Rechercher des groupes emploi</a>
                 </div>
                 <div class="oc-card">
-                    <b>🔗 Indeed / France Travail (dépôt d'annonce)</b><br>
+                    <b>🔗 Indeed / France Travail</b><br>
                     <a href="https://www.indeed.fr/jobs?q={requete_url}" target="_blank">Voir les profils similaires sur Indeed</a>
                 </div>
             """, unsafe_allow_html=True)
@@ -830,10 +1195,10 @@ if onglet == "🎯 Matching IA":
 
         st.markdown(f"""
             <div class="oc-card">
-                <b>Pathologies / besoins :</b> {benef_row['pathologies'] or 'Non renseigné'}<br>
-                <b>Gestes techniques requis :</b> {benef_row['gestes_techniques'] or 'Non renseigné'}<br>
-                <b>Horaires souhaités :</b> {benef_row['besoins_horaires'] or 'Non renseigné'}<br>
-                <b>Niveau de dépendance :</b> {benef_row['niveau_dependance'] or 'Non renseigné'}
+                <b>Besoins récurrents :</b> {benef_row.get('besoins_recurrents', '') or 'Non renseigné'}<br>
+                <b>Gestes techniques requis :</b> {benef_row.get('gestes_techniques', '') or 'Non renseigné'}<br>
+                <b>Horaires souhaités :</b> {benef_row.get('besoins_horaires', '') or 'Non renseigné'}<br>
+                <b>Niveau de dépendance :</b> {benef_row.get('niveau_dependance', '') or 'Non renseigné'}
             </div>
         """, unsafe_allow_html=True)
 
@@ -859,27 +1224,23 @@ if onglet == "🎯 Matching IA":
 
                         CONSIGNES :
                         1. Compare les gestes techniques requis avec les compétences de l'intervenant.
-                        2. Vérifie si les habilitations listées couvrent les besoins (ex : geste médical nécessitant un diplôme précis).
-                        3. Repère aussi les compétences transférables issues du parcours de l'intervenant (ex : expérience en
-                           EHPAD, aide-soignant, ou même un métier hors secteur impliquant patience, gestion de personnes
-                           vulnérables, rigueur) qui pourraient compenser un manque d'expérience directe. Pour chaque
-                           compétence transférable citée, indique de quelle expérience précise du parcours elle provient.
-                           N'invente jamais une expérience absente du texte fourni.
-                        4. Tiens compte de la compatibilité des disponibilités et de la zone géographique si mentionnées.
+                        2. Vérifie si les habilitations listées couvrent les besoins.
+                        3. Repère aussi les compétences transférables issues du parcours.
+                        4. Tiens compte de la compatibilité des disponibilités et de la zone géographique.
 
                         Renvoie STRICTEMENT un objet JSON avec les clés :
-                        - 'score_competences': entier 0-100 (adéquation gestes techniques / compétences directes)
-                        - 'score_habilitations': entier 0-100 (couverture des habilitations requises)
-                        - 'score_global': entier 0-100 (score global pondéré)
+                        - 'score_competences': entier 0-100
+                        - 'score_habilitations': entier 0-100
+                        - 'score_global': entier 0-100
                         - 'competences_transferables': liste de chaînes "compétence — issue de [expérience précise]"
                         - 'alerte_habilitation': texte court si une habilitation obligatoire semble manquante, sinon chaîne vide
                         - 'justification': synthèse de 2-3 lignes
 
                         BESOIN DU BÉNÉFICIAIRE :
-                        Pathologies/besoins : {benef_row['pathologies']}
-                        Gestes techniques requis : {benef_row['gestes_techniques']}
-                        Horaires souhaités : {benef_row['besoins_horaires']}
-                        Niveau de dépendance : {benef_row['niveau_dependance']}
+                        Besoins récurrents : {benef_row.get('besoins_recurrents', '')}
+                        Gestes techniques requis : {benef_row.get('gestes_techniques', '')}
+                        Horaires souhaités : {benef_row.get('besoins_horaires', '')}
+                        Niveau de dépendance : {benef_row.get('niveau_dependance', '')}
 
                         PROFIL INTERVENANT :
                         Compétences déclarées : {interv['competences']}
@@ -939,11 +1300,14 @@ if onglet == "🎯 Matching IA":
 
 
 # ============================================================
-#  ONGLET 3 : PORTEFEUILLE BÉNÉFICIAIRES
+#  ONGLET 3 : PORTEFEUILLE BÉNÉFICIAIRES (avec fiche simplifiée)
 # ============================================================
 if onglet == "❤️ Portefeuille Bénéficiaires":
 
     tab_liste_b, tab_ajout_b = st.tabs(["📋 Bénéficiaires suivis", "➕ Ajouter un bénéficiaire"])
+
+    df_interv_all = charger_df("SELECT id, prenom, nom FROM intervenants WHERE structure_id = ? ORDER BY nom", (st.session_state["structure_id"],))
+    interv_map = {r['id']: f"{r['prenom']} {r['nom']}" for _, r in df_interv_all.iterrows()}
 
     with tab_liste_b:
         df_b = charger_df("SELECT * FROM beneficiaires WHERE structure_id = ? ORDER BY nom", (st.session_state["structure_id"],))
@@ -954,25 +1318,69 @@ if onglet == "❤️ Portefeuille Bénéficiaires":
         else:
             for _, row in df_b.iterrows():
                 couleur = "#3fae74" if row["statut"] == "Actif" else "#8996a3"
+                attitré_nom = interv_map.get(row.get("intervenant_attitré_id"), "Non défini")
+
                 st.markdown(f"""
                     <div class="oc-card" style="border-left-color:{couleur};">
                         <div style="display:flex; justify-content:space-between; align-items:center;">
                             <span style="font-size:17px; font-weight:700;">{row['prenom']} {row['nom']}</span>
                             <span class="oc-badge" style="background-color:{couleur};">{row['statut']}</span>
                         </div>
-                        <div style="color:#b8c2cc; font-size:13px; margin-top:4px;">{row['adresse'] or ''}</div>
+                        <div style="color:#b8c2cc; font-size:13px; margin-top:4px;">
+                            📍 {row['adresse'] or '—'} &nbsp;•&nbsp; 🧑‍⚕️ Attitré : {attitré_nom}
+                        </div>
                     </div>
                 """, unsafe_allow_html=True)
 
-                with st.expander(f"Détails / actions — {row['prenom']} {row['nom']}"):
-                    st.write(f"**Pathologies / besoins :** {row['pathologies'] or 'Non renseigné'}")
-                    st.write(f"**Gestes techniques requis :** {row['gestes_techniques'] or 'Non renseigné'}")
-                    st.write(f"**Besoins horaires :** {row['besoins_horaires'] or 'Non renseigné'}")
-                    st.write(f"**Niveau de dépendance :** {row['niveau_dependance'] or 'Non renseigné'}")
-                    st.write(f"**Référent famille :** {row['referent_famille'] or 'Non renseigné'}")
-                    st.write(f"**Notes :** {row['notes'] or ''}")
+                with st.expander(f"📋 Fiche — {row['prenom']} {row['nom']}"):
+                    # --- FICHE BÉNÉFICIAIRE SIMPLIFIÉE ---
+                    col_fiche1, col_fiche2 = st.columns(2)
 
-                    col_x, col_y = st.columns(2)
+                    with col_fiche1:
+                        st.markdown(f"""
+                            <div class="fiche-section">
+                                <h4>📍 Coordonnées</h4>
+                                <div class="fiche-row"><span class="fiche-label">Adresse</span><span class="fiche-value">{row['adresse'] or '—'}</span></div>
+                                <div class="fiche-row"><span class="fiche-label">Téléphone</span><span class="fiche-value">{row['telephone'] or '—'}</span></div>
+                                <div class="fiche-row"><span class="fiche-label">Dépendance</span><span class="fiche-value">{row['niveau_dependance'] or '—'}</span></div>
+                            </div>
+                        """, unsafe_allow_html=True)
+
+                        st.markdown(f"""
+                            <div class="fiche-section">
+                                <h4>🚨 Contact d'urgence</h4>
+                                <div class="fiche-row"><span class="fiche-label">Nom / lien</span><span class="fiche-value">{row.get('contact_urgence_nom', '') or row.get('referent_famille', '') or '—'}</span></div>
+                                <div class="fiche-row"><span class="fiche-label">Téléphone</span><span class="fiche-value">{row.get('contact_urgence_tel', '') or '—'}</span></div>
+                            </div>
+                        """, unsafe_allow_html=True)
+
+                    with col_fiche2:
+                        st.markdown(f"""
+                            <div class="fiche-section">
+                                <h4>🔄 Besoins récurrents</h4>
+                                <div class="fiche-value">{row.get('besoins_recurrents', '') or row.get('besoins_horaires', '') or '—'}</div>
+                            </div>
+                        """, unsafe_allow_html=True)
+
+                        st.markdown(f"""
+                            <div class="fiche-section">
+                                <h4>🧑‍⚕️ Intervenant attitré</h4>
+                                <div class="fiche-value" style="font-size:15px; font-weight:600;">{attitré_nom}</div>
+                            </div>
+                        """, unsafe_allow_html=True)
+
+                        if row.get('notes'):
+                            st.markdown(f"""
+                                <div class="fiche-section">
+                                    <h4>📝 Notes</h4>
+                                    <div class="fiche-value">{row['notes']}</div>
+                                </div>
+                            """, unsafe_allow_html=True)
+
+                    st.markdown("<br>", unsafe_allow_html=True)
+
+                    # --- Actions ---
+                    col_x, col_y, col_z = st.columns(3)
                     with col_x:
                         nouveau_statut_b = st.selectbox("Statut", ["Actif", "Inactif"], index=0 if row["statut"] == "Actif" else 1, key=f"statut_b_{row['id']}")
                         if st.button("Mettre à jour le statut", key=f"maj_b_{row['id']}"):
@@ -980,7 +1388,24 @@ if onglet == "❤️ Portefeuille Bénéficiaires":
                             st.success("Statut mis à jour.")
                             st.rerun()
                     with col_y:
-                        if st.button("🗑️ Supprimer ce bénéficiaire", key=f"del_b_{row['id']}"):
+                        # Changement d'intervenant attitré
+                        options_interv = {"Non défini": None}
+                        options_interv.update({v: k for k, v in interv_map.items()})
+                        idx_att = 0
+                        att_id = row.get("intervenant_attitré_id")
+                        if att_id and att_id in interv_map:
+                            labels_list = list(options_interv.keys())
+                            att_label = interv_map[att_id]
+                            if att_label in labels_list:
+                                idx_att = labels_list.index(att_label)
+                        nouvel_attitré = st.selectbox("Intervenant attitré", list(options_interv.keys()), index=idx_att, key=f"att_{row['id']}")
+                        if st.button("Définir comme attitré", key=f"set_att_{row['id']}"):
+                            executer("UPDATE beneficiaires SET intervenant_attitré_id = ? WHERE id = ? AND structure_id = ?",
+                                     (options_interv[nouvel_attitré], row["id"], st.session_state["structure_id"]))
+                            st.success("Intervenant attitré mis à jour.")
+                            st.rerun()
+                    with col_z:
+                        if st.button("🗑️ Supprimer", key=f"del_b_{row['id']}"):
                             executer("DELETE FROM beneficiaires WHERE id = ? AND structure_id = ?", (row["id"], st.session_state["structure_id"]))
                             st.warning("Bénéficiaire supprimé.")
                             st.rerun()
@@ -990,24 +1415,36 @@ if onglet == "❤️ Portefeuille Bénéficiaires":
         with st.form("form_ajout_beneficiaire"):
             col1, col2 = st.columns(2)
             with col1:
-                nom_b = st.text_input("Nom")
-                prenom_b = st.text_input("Prénom")
+                nom_b = st.text_input("Nom *")
+                prenom_b = st.text_input("Prénom *")
                 adresse_b = st.text_input("Adresse")
                 telephone_b = st.text_input("Téléphone")
-                niveau_dep = st.selectbox("Niveau de dépendance (GIR ou équivalent)", ["GIR 1", "GIR 2", "GIR 3", "GIR 4", "GIR 5", "GIR 6", "Non évalué"])
+                niveau_dep = st.selectbox("Niveau de dépendance (GIR)", ["GIR 1", "GIR 2", "GIR 3", "GIR 4", "GIR 5", "GIR 6", "Non évalué"])
             with col2:
-                pathologies = st.text_area("Pathologies / besoins particuliers")
-                gestes = st.text_area("Gestes techniques requis", placeholder="Ex : aide à la toilette, transfert avec lève-personne, aide au repas...")
-                horaires = st.text_input("Besoins horaires", placeholder="Ex : matin 8h-9h30, soir 19h-20h")
-                referent = st.text_input("Référent famille (nom + téléphone)")
+                contact_urgence_nom_b = st.text_input("Contact d'urgence (nom + lien de parenté)", placeholder="Ex : Marie Dupont, fille")
+                contact_urgence_tel_b = st.text_input("Téléphone contact d'urgence")
+                besoins_recurrents_b = st.text_area("Besoins récurrents", placeholder="Ex : aide à la toilette matin, repas midi, ménage lundi et jeudi")
+                gestes_b = st.text_area("Gestes techniques requis", placeholder="Ex : aide à la toilette, transfert avec lève-personne...")
+                horaires_b = st.text_input("Besoins horaires", placeholder="Ex : matin 8h-9h30, soir 19h-20h")
                 notes_b = st.text_area("Notes complémentaires")
+
+            # Sélection de l'intervenant attitré dès la création
+            interv_options_b = {"Non défini": None}
+            if not df_interv_all.empty:
+                interv_options_b.update({f"{r['prenom']} {r['nom']}": r['id'] for _, r in df_interv_all.iterrows()})
+            interv_att_b = st.selectbox("Intervenant attitré (optionnel)", list(interv_options_b.keys()))
 
             submit_b = st.form_submit_button("Ajouter le bénéficiaire")
             if submit_b and nom_b and prenom_b:
                 executer(
-                    """INSERT INTO beneficiaires (structure_id, nom, prenom, adresse, telephone, niveau_dependance, pathologies, gestes_techniques, besoins_horaires, referent_famille, notes, statut, date_creation)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Actif', ?)""",
-                    (st.session_state["structure_id"], nom_b, prenom_b, adresse_b, telephone_b, niveau_dep, pathologies, gestes, horaires, referent, notes_b, datetime.date.today().isoformat())
+                    """INSERT INTO beneficiaires (structure_id, nom, prenom, adresse, telephone, niveau_dependance,
+                       gestes_techniques, besoins_horaires, referent_famille, notes, statut, date_creation,
+                       contact_urgence_nom, contact_urgence_tel, besoins_recurrents, intervenant_attitré_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Actif', ?, ?, ?, ?, ?)""",
+                    (st.session_state["structure_id"], nom_b, prenom_b, adresse_b, telephone_b, niveau_dep,
+                     gestes_b, horaires_b, contact_urgence_nom_b, notes_b, datetime.date.today().isoformat(),
+                     contact_urgence_nom_b, contact_urgence_tel_b, besoins_recurrents_b,
+                     interv_options_b[interv_att_b])
                 )
                 st.success(f"{prenom_b} {nom_b} ajouté(e) au portefeuille.")
                 st.rerun()
@@ -1105,13 +1542,142 @@ if onglet == "📝 Documents & Transmissions":
 # ============================================================
 if onglet == "📅 Plannings, Tournées & Urgences":
 
-    tab_planning, tab_urgence = st.tabs(["📅 Planning", "🚨 Remplacement d'urgence"])
+    tab_planning_visuel, tab_planning_ajout, tab_remplacement, tab_urgence = st.tabs([
+        "📊 Planning hebdomadaire",
+        "➕ Planifier une intervention",
+        "🔄 Remplacements & absences",
+        "🚨 Urgences en cours"
+    ])
 
-    df_benef3 = charger_df("SELECT * FROM beneficiaires WHERE statut = 'Actif' AND structure_id = ? ORDER BY nom", (st.session_state["structure_id"],))
-    df_interv3 = charger_df("SELECT * FROM intervenants WHERE structure_id = ? ORDER BY nom", (st.session_state["structure_id"],))
+    sid = st.session_state["structure_id"]
+    df_benef3 = charger_df("SELECT * FROM beneficiaires WHERE statut = 'Actif' AND structure_id = ? ORDER BY nom", (sid,))
+    df_interv3 = charger_df("SELECT * FROM intervenants WHERE structure_id = ? ORDER BY nom", (sid,))
 
-    with tab_planning:
-        st.subheader("Planifier une intervention")
+    # ----------------------------------------------------------
+    #  TAB 1 : PLANNING HEBDOMADAIRE VISUEL
+    # ----------------------------------------------------------
+    with tab_planning_visuel:
+        st.subheader("📊 Planning hebdomadaire — vue par intervenant")
+
+        # Navigation semaine
+        if "semaine_offset" not in st.session_state:
+            st.session_state["semaine_offset"] = 0
+
+        col_nav1, col_nav2, col_nav3 = st.columns([1, 3, 1])
+        with col_nav1:
+            if st.button("◀ Semaine précédente"):
+                st.session_state["semaine_offset"] -= 1
+                st.rerun()
+        with col_nav3:
+            if st.button("Semaine suivante ▶"):
+                st.session_state["semaine_offset"] += 1
+                st.rerun()
+
+        offset = st.session_state["semaine_offset"]
+        aujourdhui = datetime.date.today()
+        lundi_semaine = aujourdhui - datetime.timedelta(days=aujourdhui.weekday()) + datetime.timedelta(weeks=offset)
+        dimanche_semaine = lundi_semaine + datetime.timedelta(days=6)
+
+        with col_nav2:
+            st.markdown(f"<div style='text-align:center; color:#4c8dfa; font-weight:700; font-size:16px;'>Semaine du {lundi_semaine.strftime('%d/%m/%Y')} au {dimanche_semaine.strftime('%d/%m/%Y')}</div>", unsafe_allow_html=True)
+
+        if st.button("🔙 Revenir à la semaine courante", key="reset_semaine"):
+            st.session_state["semaine_offset"] = 0
+            st.rerun()
+
+        # Chargement des interventions de la semaine
+        df_semaine = charger_df("""
+            SELECT i.id, i.date_intervention, i.heure_debut, i.heure_fin, i.type_intervention, i.statut,
+                   b.prenom || ' ' || b.nom as beneficiaire,
+                   v.id as intervenant_id, v.prenom || ' ' || v.nom as intervenant
+            FROM interventions i
+            LEFT JOIN beneficiaires b ON i.beneficiaire_id = b.id
+            LEFT JOIN intervenants v ON i.intervenant_id = v.id
+            WHERE i.date_intervention BETWEEN ? AND ? AND i.structure_id = ?
+            ORDER BY i.heure_debut
+        """, (lundi_semaine.isoformat(), dimanche_semaine.isoformat(), sid))
+
+        JOURS = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
+        dates_semaine = [lundi_semaine + datetime.timedelta(days=i) for i in range(7)]
+
+        if df_interv3.empty:
+            st.info("Aucun intervenant enregistré. Ajoutez des intervenants pour visualiser le planning.")
+        else:
+            # En-tête du tableau
+            headers_html = '<th class="col-intervenant">Intervenant</th>'
+            for i, d in enumerate(dates_semaine):
+                is_today = (d == aujourdhui)
+                style_today = " style='background:rgba(47,124,246,0.25); color:#4c8dfa;'" if is_today else ""
+                headers_html += f'<th{style_today}>{JOURS[i]}<br><small>{d.strftime("%d/%m")}</small></th>'
+
+            rows_html = ""
+            for _, interv in df_interv3.iterrows():
+                row_html = f'<td class="col-intervenant">{interv["prenom"]} {interv["nom"]}</td>'
+
+                for d in dates_semaine:
+                    date_str = d.isoformat()
+                    interventions_du_jour = df_semaine[
+                        (df_semaine["date_intervention"] == date_str) &
+                        (df_semaine["intervenant_id"] == interv["id"])
+                    ] if not df_semaine.empty else pd.DataFrame()
+
+                    if interventions_du_jour.empty:
+                        row_html += '<td><div class="planning-empty">·</div></td>'
+                    else:
+                        cell_content = ""
+                        for _, interv_row in interventions_du_jour.iterrows():
+                            css_extra = ""
+                            if interv_row["statut"] == "Urgence à pourvoir":
+                                css_extra = " urgence"
+                            elif interv_row["statut"] == "Réalisé":
+                                css_extra = " realise"
+                            elif interv_row["statut"] == "Annulé":
+                                css_extra = " annule"
+                            cell_content += f"""
+                                <div class="planning-cell{css_extra}">
+                                    <b>{interv_row['heure_debut']}–{interv_row['heure_fin']}</b><br>
+                                    {interv_row['beneficiaire']}<br>
+                                    <span style='color:#8996a3;font-size:11px;'>{interv_row['type_intervention']}</span>
+                                </div>
+                            """
+                        row_html += f'<td>{cell_content}</td>'
+
+                rows_html += f"<tr>{row_html}</tr>"
+
+            # Légende
+            st.markdown("""
+                <div style="display:flex; gap:16px; margin-bottom:12px; flex-wrap:wrap;">
+                    <span><span style="display:inline-block;width:12px;height:12px;background:#2f7cf6;border-radius:2px;margin-right:4px;"></span>Planifié</span>
+                    <span><span style="display:inline-block;width:12px;height:12px;background:#e0554f;border-radius:2px;margin-right:4px;"></span>Urgence à pourvoir</span>
+                    <span><span style="display:inline-block;width:12px;height:12px;background:#3fae74;border-radius:2px;margin-right:4px;"></span>Réalisé</span>
+                    <span><span style="display:inline-block;width:12px;height:12px;background:#8996a3;border-radius:2px;margin-right:4px;"></span>Annulé</span>
+                </div>
+            """, unsafe_allow_html=True)
+
+            planning_html = f"""
+                <div style="overflow-x:auto;">
+                <table class="planning-table">
+                    <thead><tr>{headers_html}</tr></thead>
+                    <tbody>{rows_html}</tbody>
+                </table>
+                </div>
+            """
+            st.markdown(planning_html, unsafe_allow_html=True)
+
+            # Stats de la semaine
+            st.markdown("<br>", unsafe_allow_html=True)
+            if not df_semaine.empty:
+                col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+                col_s1.metric("Total interventions", len(df_semaine))
+                col_s2.metric("Réalisées", len(df_semaine[df_semaine["statut"] == "Réalisé"]))
+                col_s3.metric("Urgences", len(df_semaine[df_semaine["statut"] == "Urgence à pourvoir"]))
+                col_s4.metric("Planifiées", len(df_semaine[df_semaine["statut"] == "Planifié"]))
+
+    # ----------------------------------------------------------
+    #  TAB 2 : PLANIFIER UNE INTERVENTION
+    # ----------------------------------------------------------
+    with tab_planning_ajout:
+        st.subheader("➕ Planifier une nouvelle intervention")
         if df_benef3.empty or df_interv3.empty:
             st.info("Ajoute au moins un bénéficiaire et un intervenant pour créer un planning.")
         else:
@@ -1135,13 +1701,13 @@ if onglet == "📅 Plannings, Tournées & Urgences":
                     heure_fin_p = st.time_input("Heure de fin")
 
                 notes_p = st.text_input("Notes (optionnel)")
-                submit_p = st.form_submit_button("Planifier")
+                submit_p = st.form_submit_button("Planifier l'intervention")
 
                 if submit_p:
                     executer(
                         """INSERT INTO interventions (structure_id, beneficiaire_id, intervenant_id, date_intervention, heure_debut, heure_fin, type_intervention, statut, notes)
                            VALUES (?, ?, ?, ?, ?, ?, ?, 'Planifié', ?)""",
-                        (st.session_state["structure_id"], benef_labels3[benef_p], interv_labels3[interv_p], date_p.isoformat(), heure_debut_p.strftime("%H:%M"), heure_fin_p.strftime("%H:%M"), type_interv_p, notes_p)
+                        (sid, benef_labels3[benef_p], interv_labels3[interv_p], date_p.isoformat(), heure_debut_p.strftime("%H:%M"), heure_fin_p.strftime("%H:%M"), type_interv_p, notes_p)
                     )
                     st.success("Intervention planifiée.")
                     st.rerun()
@@ -1156,7 +1722,7 @@ if onglet == "📅 Plannings, Tournées & Urgences":
             LEFT JOIN intervenants v ON i.intervenant_id = v.id
             WHERE i.date_intervention >= ? AND i.structure_id = ?
             ORDER BY i.date_intervention, i.heure_debut
-        """, (datetime.date.today().isoformat(), st.session_state["structure_id"]))
+        """, (datetime.date.today().isoformat(), sid))
 
         if df_plan.empty:
             st.caption("Aucune intervention planifiée à venir.")
@@ -1172,22 +1738,203 @@ if onglet == "📅 Plannings, Tournées & Urgences":
                         </div>
                     """, unsafe_allow_html=True)
                 with col_action:
-                    if row["statut"] not in ["Urgence à pourvoir", "Annulé"]:
+                    if row["statut"] == "Planifié":
+                        if st.button("✅ Réalisée", key=f"realise_{row['id']}"):
+                            executer("UPDATE interventions SET statut = 'Réalisé' WHERE id = ? AND structure_id = ?", (row["id"], sid))
+                            st.rerun()
+                    if row["statut"] not in ["Urgence à pourvoir", "Annulé", "Réalisé"]:
                         if st.button("🚨 Absence", key=f"absence_{row['id']}"):
-                            executer("UPDATE interventions SET statut = 'Urgence à pourvoir' WHERE id = ? AND structure_id = ?", (row["id"], st.session_state["structure_id"]))
+                            executer("UPDATE interventions SET statut = 'Urgence à pourvoir' WHERE id = ? AND structure_id = ?", (row["id"], sid))
                             st.rerun()
 
+    # ----------------------------------------------------------
+    #  TAB 3 : REMPLACEMENTS & ABSENCES (nouveau)
+    # ----------------------------------------------------------
+    with tab_remplacement:
+        st.subheader("🔄 Gestion des remplacements & absences")
+        st.caption("Signalez une absence : l'outil identifie automatiquement les remplaçants disponibles ayant les habilitations requises pour le bénéficiaire concerné.")
+
+        df_plan_rem = charger_df("""
+            SELECT i.id, i.date_intervention, i.heure_debut, i.heure_fin, i.type_intervention, i.statut,
+                   b.id as benef_id, b.prenom || ' ' || b.nom as beneficiaire,
+                   b.gestes_techniques, b.besoins_recurrents,
+                   v.id as intervenant_id, v.prenom || ' ' || v.nom as intervenant
+            FROM interventions i
+            LEFT JOIN beneficiaires b ON i.beneficiaire_id = b.id
+            LEFT JOIN intervenants v ON i.intervenant_id = v.id
+            WHERE i.date_intervention >= ? AND i.structure_id = ? AND i.statut = 'Planifié'
+            ORDER BY i.date_intervention, i.heure_debut
+        """, (datetime.date.today().isoformat(), sid))
+
+        if df_plan_rem.empty:
+            st.info("Aucune intervention planifiée à venir. Planifiez d'abord des interventions.")
+        else:
+            # Sélection de l'intervention concernée
+            options_interventions = {
+                f"{r['date_intervention']} {r['heure_debut']}–{r['heure_fin']} | {r['beneficiaire']} ← {r['intervenant']}": r['id']
+                for _, r in df_plan_rem.iterrows()
+            }
+            interv_choisie_label = st.selectbox("Intervention concernée par l'absence", list(options_interventions.keys()))
+            interv_choisie_id = options_interventions[interv_choisie_label]
+            interv_choisie_row = df_plan_rem[df_plan_rem["id"] == interv_choisie_id].iloc[0]
+
+            st.markdown(f"""
+                <div class="oc-card oc-card-warning">
+                    <b>📋 Intervention sélectionnée</b><br>
+                    📅 {interv_choisie_row['date_intervention']} — {interv_choisie_row['heure_debut']} à {interv_choisie_row['heure_fin']}<br>
+                    👤 Bénéficiaire : <b>{interv_choisie_row['beneficiaire']}</b><br>
+                    🧑‍⚕️ Intervenant prévu : <b>{interv_choisie_row['intervenant']}</b><br>
+                    🩺 Type : {interv_choisie_row['type_intervention']}
+                </div>
+            """, unsafe_allow_html=True)
+
+            col_ab1, col_ab2 = st.columns(2)
+            with col_ab1:
+                if st.button("🚨 Déclarer l'absence & chercher un remplaçant", type="primary"):
+                    # Marquer l'intervention en urgence
+                    executer("UPDATE interventions SET statut = 'Urgence à pourvoir', intervenant_id = NULL WHERE id = ? AND structure_id = ?",
+                             (interv_choisie_id, sid))
+                    # Marquer l'intervenant indisponible
+                    if interv_choisie_row["intervenant_id"]:
+                        executer("UPDATE intervenants SET statut_dispo = 'Indisponible' WHERE id = ? AND structure_id = ?",
+                                 (interv_choisie_row["intervenant_id"], sid))
+
+                    # Recherche des remplaçants : disponibles, habilitations compatibles
+                    besoins_benef = interv_choisie_row.get("gestes_techniques", "") or interv_choisie_row.get("besoins_recurrents", "") or ""
+
+                    # Intervenants disponibles (hors l'absent)
+                    df_dispo_rem = charger_df("""
+                        SELECT v.id, v.prenom, v.nom, v.competences, v.zone_geo, v.disponibilites, v.email
+                        FROM intervenants v
+                        WHERE v.structure_id = ? AND v.statut_dispo = 'Disponible'
+                        AND v.id != ?
+                        ORDER BY v.nom
+                    """, (sid, interv_choisie_row["intervenant_id"] or 0))
+
+                    # Récupération des habilitations requises pour le bénéficiaire
+                    # (on identifie les habilitations des interventions passées pour ce bénéficiaire)
+                    date_interv = interv_choisie_row["date_intervention"]
+
+                    st.session_state["remplaçants_trouves"] = []
+                    st.session_state["intervention_remplacement_id"] = interv_choisie_id
+                    st.session_state["besoins_remplacement"] = besoins_benef
+
+                    if df_dispo_rem.empty:
+                        st.session_state["remplaçants_trouves"] = []
+                    else:
+                        candidats_scores = []
+                        for _, cand in df_dispo_rem.iterrows():
+                            # Vérification simple des habilitations du candidat
+                            df_habs_cand = charger_df("""
+                                SELECT type_habilitation, date_expiration FROM habilitations
+                                WHERE intervenant_id = ? AND structure_id = ?
+                                AND date_expiration >= ?
+                            """, (cand["id"], sid, datetime.date.today().isoformat()))
+
+                            habs_valides = [h["type_habilitation"] for _, h in df_habs_cand.iterrows()]
+
+                            # Score simple de compatibilité
+                            score = 50  # Base
+                            besoins_lower = besoins_benef.lower()
+                            comp_lower = (cand["competences"] or "").lower()
+
+                            # Bonus compétences
+                            mots_cles = ["toilette", "repas", "ménage", "transfert", "accompagnement", "soins", "aide"]
+                            for mot in mots_cles:
+                                if mot in besoins_lower and mot in comp_lower:
+                                    score += 10
+
+                            candidats_scores.append({
+                                "id": cand["id"],
+                                "nom": f"{cand['prenom']} {cand['nom']}",
+                                "zone": cand["zone_geo"] or "—",
+                                "competences": cand["competences"] or "—",
+                                "disponibilites": cand["disponibilites"] or "—",
+                                "email": cand["email"] or "",
+                                "habilitations": ", ".join(habs_valides) if habs_valides else "Aucune enregistrée",
+                                "score": min(score, 100)
+                            })
+
+                        st.session_state["remplaçants_trouves"] = sorted(candidats_scores, key=lambda x: x["score"], reverse=True)
+
+                    st.success("Absence déclarée. Remplaçants disponibles identifiés ci-dessous.")
+                    st.rerun()
+
+            with col_ab2:
+                st.caption("L'intervenant sera marqué indisponible et l'intervention passera en urgence à pourvoir.")
+
+            # Affichage des remplaçants trouvés
+            if st.session_state.get("remplaçants_trouves") is not None and st.session_state.get("intervention_remplacement_id") == interv_choisie_id:
+                remplaçants = st.session_state["remplaçants_trouves"]
+
+                st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
+                st.markdown("### 👥 Remplaçants disponibles & compatibles")
+
+                if not remplaçants:
+                    st.warning("⚠️ Aucun intervenant disponible actuellement dans le vivier. Consultez l'onglet Urgences pour la gestion manuelle.")
+                else:
+                    for i, cand in enumerate(remplaçants):
+                        couleur_score = "#3fae74" if cand["score"] >= 70 else ("#d99a3d" if cand["score"] >= 40 else "#4c8dfa")
+                        col_c1, col_c2 = st.columns([4, 1])
+                        with col_c1:
+                            st.markdown(f"""
+                                <div class="oc-card" style="border-left-color:{couleur_score};">
+                                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                                        <span style="font-weight:700;font-size:15px;">#{i+1} — {cand['nom']}</span>
+                                        <span class="oc-badge" style="background:{couleur_score};">Score {cand['score']}%</span>
+                                    </div>
+                                    <div style="color:#b8c2cc;font-size:13px;margin-top:6px;">
+                                        📍 Zone : {cand['zone']} &nbsp;|&nbsp; ⏰ Dispo : {cand['disponibilites']}<br>
+                                        🎓 Habilitations valides : {cand['habilitations']}<br>
+                                        🛠️ Compétences : {cand['competences'][:80]}{'...' if len(cand['competences']) > 80 else ''}
+                                    </div>
+                                </div>
+                            """, unsafe_allow_html=True)
+                        with col_c2:
+                            if st.button(f"✅ Assigner", key=f"assign_rem_{cand['id']}_{interv_choisie_id}"):
+                                executer(
+                                    "UPDATE interventions SET intervenant_id = ?, statut = 'Planifié' WHERE id = ? AND structure_id = ?",
+                                    (cand["id"], interv_choisie_id, sid)
+                                )
+                                executer(
+                                    "UPDATE intervenants SET statut_dispo = 'En mission' WHERE id = ? AND structure_id = ?",
+                                    (cand["id"], sid)
+                                )
+                                st.session_state.pop("remplaçants_trouves", None)
+                                st.success(f"✅ {cand['nom']} assigné(e) en remplacement.")
+                                st.rerun()
+
+                            # Envoi email si boîte configurée
+                            cfg_mail = st.session_state.get("mail_config", {})
+                            if cand["email"] and cfg_mail.get("email"):
+                                if st.button("📧 Email", key=f"mail_rem_{cand['id']}_{interv_choisie_id}"):
+                                    row_urg = df_plan_rem[df_plan_rem["id"] == interv_choisie_id].iloc[0]
+                                    ok_m, msg_m = envoyer_email_intervenant(
+                                        cand["email"],
+                                        f"Remplacement urgent le {row_urg['date_intervention']}",
+                                        f"Bonjour {cand['nom']},\n\nUne intervention est à pourvoir le {row_urg['date_intervention']} de {row_urg['heure_debut']} à {row_urg['heure_fin']} ({row_urg['type_intervention']}).\nPouvez-vous assurer ce remplacement ?\n\nMerci.",
+                                        cfg_mail["email"], cfg_mail["password"]
+                                    )
+                                    if ok_m:
+                                        st.success("Email envoyé.")
+                                    else:
+                                        st.error(msg_m)
+
+    # ----------------------------------------------------------
+    #  TAB 4 : URGENCES EN COURS (repris de l'existant)
+    # ----------------------------------------------------------
     with tab_urgence:
         st.subheader("🚨 Interventions à pourvoir en urgence")
+        st.caption("🤖 L'agent IA classe les intervenants disponibles par pertinence pour chaque remplacement, sollicite automatiquement le meilleur candidat, puis relance le suivant en cascade en cas de refus.")
         df_urgences = charger_df("""
             SELECT i.id, i.date_intervention, i.heure_debut, i.heure_fin, i.type_intervention,
                    b.id as beneficiaire_id, b.prenom || ' ' || b.nom as beneficiaire,
-                   b.pathologies, b.gestes_techniques
+                   b.gestes_techniques
             FROM interventions i
             LEFT JOIN beneficiaires b ON i.beneficiaire_id = b.id
             WHERE i.statut = 'Urgence à pourvoir' AND i.structure_id = ?
             ORDER BY i.date_intervention, i.heure_debut
-        """, (st.session_state["structure_id"],))
+        """, (sid,))
 
         if df_urgences.empty:
             st.success("✅ Aucune urgence en cours.")
@@ -1200,19 +1947,67 @@ if onglet == "📅 Plannings, Tournées & Urgences":
                     </div>
                 """, unsafe_allow_html=True)
 
-                if st.button(f"🔎 Trouver un remplaçant disponible", key=f"find_{urg['id']}"):
-                    df_dispo = charger_df("SELECT * FROM intervenants WHERE statut_dispo = 'Disponible' AND structure_id = ?", (st.session_state["structure_id"],))
+                sollicitation_active = charger_df("""
+                    SELECT s.id, s.intervenant_id, s.score_global, s.justification, s.alerte_habilitation, s.date_envoi,
+                           v.prenom || ' ' || v.nom as intervenant
+                    FROM sollicitations_urgence s
+                    LEFT JOIN intervenants v ON s.intervenant_id = v.id
+                    WHERE s.intervention_id = ? AND s.structure_id = ? AND s.statut = 'En attente'
+                    ORDER BY s.date_envoi DESC LIMIT 1
+                """, (int(urg["id"]), sid))
+
+                if not sollicitation_active.empty:
+                    sol = sollicitation_active.iloc[0]
+                    st.markdown(f"""
+                        <div class="oc-card oc-card-warning">
+                            🤖 <b>Candidat sollicité automatiquement :</b> {sol['intervenant']} (score IA : {sol['score_global']}%)<br>
+                            <span style="color:#b8c2cc;">Envoyé le {str(sol['date_envoi'])[:16].replace('T', ' ')} — {sol['justification']}</span><br>
+                            ⏳ En attente de réponse du candidat.
+                        </div>
+                    """, unsafe_allow_html=True)
+                    if sol["alerte_habilitation"]:
+                        st.warning(f"⚠️ {sol['alerte_habilitation']}")
+                    col_a, col_r = st.columns(2)
+                    with col_a:
+                        if st.button("✅ A accepté", key=f"accepte_{sol['id']}"):
+                            traiter_reponse_sollicitation(int(sol["id"]), int(urg["id"]), int(sol["intervenant_id"]), "Accepté", sid)
+                            st.success("Remplacement confirmé, planning mis à jour automatiquement.")
+                            st.rerun()
+                    with col_r:
+                        if st.button("❌ A refusé → relancer le suivant", key=f"refuse_{sol['id']}"):
+                            traiter_reponse_sollicitation(int(sol["id"]), int(urg["id"]), int(sol["intervenant_id"]), "Refusé", sid)
+                            st.rerun()
+                else:
+                    df_dispo = charger_df("SELECT * FROM intervenants WHERE statut_dispo = 'Disponible' AND structure_id = ?", (sid,))
                     if df_dispo.empty:
                         st.warning("Aucun intervenant disponible actuellement dans le vivier.")
+                    elif IA_DISPONIBLE:
+                        if st.button("🤖 Lancer la recherche IA & solliciter automatiquement", key=f"cascade_{urg['id']}"):
+                            autorise, _, _ = peut_utiliser_ia(st.session_state["user_email"])
+                            if not autorise:
+                                st.error("Quota de requêtes IA atteint pour votre compte.")
+                            else:
+                                classement = classer_candidats_urgence(urg, df_dispo, sid)
+                                incrementer_quota_ia(st.session_state["user_email"])
+                                candidat = prochain_candidat_non_sollicite(int(urg["id"]), classement, sid)
+                                if not candidat:
+                                    st.warning("Tous les intervenants disponibles ont déjà été sollicités sans succès pour cette urgence.")
+                                else:
+                                    ok, msg = solliciter_candidat_urgence(urg, candidat, sid)
+                                    if ok:
+                                        st.success(f"Meilleur candidat identifié : {candidat['intervenant_nom']} ({candidat.get('score_global', 0)}%) — sollicitation envoyée automatiquement.")
+                                        st.rerun()
+                                    else:
+                                        st.error(msg)
                     else:
-                        st.markdown("**Intervenants disponibles suggérés (à contacter par ordre de pertinence) :**")
+                        st.info("Clé API Gemini non configurée — sollicitation manuelle uniquement.")
                         for _, cand in df_dispo.iterrows():
                             col_c1, col_c2 = st.columns([3, 1])
                             with col_c1:
                                 st.write(f"👤 **{cand['prenom']} {cand['nom']}** — {cand['zone_geo'] or 'zone non précisée'} — {cand['competences'] or ''}")
                             with col_c2:
                                 if cand["email"] and st.session_state.get("mail_config", {}).get("email"):
-                                    if st.button("📧 Solliciter", key=f"solliciter_{urg['id']}_{cand['id']}"):
+                                    if st.button("📧 Solliciter", key=f"solliciter_manuel_{urg['id']}_{cand['id']}"):
                                         cfg = st.session_state["mail_config"]
                                         sujet = f"Remplacement urgent le {urg['date_intervention']}"
                                         corps = (
@@ -1227,9 +2022,22 @@ if onglet == "📅 Plannings, Tournées & Urgences":
                                         else:
                                             st.error(msg)
 
-                if st.button("✅ Marquer comme pourvue", key=f"resolu_{urg['id']}"):
-                    executer("UPDATE interventions SET statut = 'Planifié' WHERE id = ? AND structure_id = ?", (urg["id"], st.session_state["structure_id"]))
+                df_hist = charger_df("""
+                    SELECT s.date_envoi, s.statut, s.score_global, v.prenom || ' ' || v.nom as intervenant
+                    FROM sollicitations_urgence s
+                    LEFT JOIN intervenants v ON s.intervenant_id = v.id
+                    WHERE s.intervention_id = ? AND s.structure_id = ?
+                    ORDER BY s.date_envoi DESC
+                """, (int(urg["id"]), sid))
+                if not df_hist.empty:
+                    with st.expander("📜 Historique des sollicitations pour cette urgence"):
+                        st.dataframe(df_hist, use_container_width=True, hide_index=True)
+
+                if st.button("✅ Marquer comme pourvue manuellement", key=f"resolu_{urg['id']}"):
+                    executer("UPDATE interventions SET statut = 'Planifié' WHERE id = ? AND structure_id = ?", (urg["id"], sid))
                     st.rerun()
+
+                st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
 
 
 # ============================================================
@@ -1312,7 +2120,7 @@ if onglet == "✅ Conformité & Suivi":
 
 
 # ============================================================
-#  ONGLET 7 : ADMINISTRATION & PARAMÈTRES
+#  ONGLET 7 : MON PROFIL
 # ============================================================
 if onglet == "👤 Mon Profil":
 
@@ -1336,7 +2144,7 @@ if onglet == "👤 Mon Profil":
 
 
 # ============================================================
-#   ONGLET ADMIN-ONLY : ADMINISTRATION
+#  ONGLET ADMIN-ONLY : ADMINISTRATION
 # ============================================================
 if onglet == "🛠️ Administration" and st.session_state.get("is_admin", False):
 
@@ -1363,47 +2171,38 @@ if onglet == "🛠️ Administration" and st.session_state.get("is_admin", False
     """)
     st.dataframe(df_users_admin, use_container_width=True, hide_index=True)
 
-    # ============================================================
-    # GESTION / SUPPRESSION DES UTILISATEURS & STRUCTURES
-    # ============================================================
     st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
     st.subheader("🗑️ Gestion et suppression d'un accès")
 
     df_users_del = charger_df("SELECT id, email FROM utilisateurs WHERE email != 'admin@omnicoord.fr'")
-    
+
     if not df_users_del.empty:
         user_to_delete = st.selectbox(
-            "Sélectionner l'utilisateur à supprimer", 
+            "Sélectionner l'utilisateur à supprimer",
             options=df_users_del["email"].tolist(),
             key="select_user_to_delete"
         )
-        
+
         confirm_del = st.checkbox("Je confirme vouloir supprimer cet accès et toutes les données associées à cette structure")
-        
+
         if st.button("🗑️ Supprimer définitivement l'utilisateur"):
             if confirm_del:
                 try:
                     conn = sqlite3.connect(DB_NAME)
                     cursor = conn.cursor()
-                    
                     cursor.execute("SELECT structure_id FROM utilisateurs WHERE email = ?", (user_to_delete,))
                     res = cursor.fetchone()
-                    
                     if res:
                         struct_id = res[0]
-                        
                         cursor.execute("DELETE FROM utilisateurs WHERE email = ?", (user_to_delete,))
-                        
                         cursor.execute("SELECT COUNT(*) FROM utilisateurs WHERE structure_id = ?", (struct_id,))
                         remaining_users = cursor.fetchone()[0]
-                        
                         if remaining_users == 0:
                             cursor.execute("DELETE FROM beneficiaires WHERE structure_id = ?", (struct_id,))
                             cursor.execute("DELETE FROM intervenants WHERE structure_id = ?", (struct_id,))
                             cursor.execute("DELETE FROM interventions WHERE structure_id = ?", (struct_id,))
                             cursor.execute("DELETE FROM documents_transmissions WHERE structure_id = ?", (struct_id,))
                             cursor.execute("DELETE FROM structures WHERE id = ?", (struct_id,))
-                        
                         conn.commit()
                         conn.close()
                         st.success(f"L'accès pour {user_to_delete} a été supprimé avec succès !")
