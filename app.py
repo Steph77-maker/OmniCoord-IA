@@ -26,6 +26,59 @@ import streamlit as st
 
 DB_NAME = "omnicoord.db"
 
+# ============================================================
+#  LOCALISATION FRANÇAISE DES DATES (sans dépendance externe)
+# ============================================================
+_JOURS_FR = {
+    "Monday": "Lundi", "Tuesday": "Mardi", "Wednesday": "Mercredi",
+    "Thursday": "Jeudi", "Friday": "Vendredi", "Saturday": "Samedi", "Sunday": "Dimanche",
+}
+_JOURS_FR_COURT = {
+    "Mon": "Lun", "Tue": "Mar", "Wed": "Mer",
+    "Thu": "Jeu", "Fri": "Ven", "Sat": "Sam", "Sun": "Dim",
+}
+_MOIS_FR = {
+    "January": "janvier", "February": "février", "March": "mars",
+    "April": "avril", "May": "mai", "June": "juin",
+    "July": "juillet", "August": "août", "September": "septembre",
+    "October": "octobre", "November": "novembre", "December": "décembre",
+}
+
+
+def date_fr(d, format_affichage="long"):
+    """Retourne une date formatée en français sans bibliothèque externe.
+
+    Formats disponibles :
+      - "long"   → "Vendredi 21 août 2026"
+      - "court"  → "21/08/2026"
+      - "medium" → "21 août 2026"
+      - "semaine"→ "lun. 21/08"
+    """
+    if isinstance(d, str):
+        try:
+            d = datetime.date.fromisoformat(d)
+        except ValueError:
+            return d  # retourne la chaîne telle quelle si non parseable
+
+    if format_affichage == "long":
+        jour_en = d.strftime("%A")
+        mois_en = d.strftime("%B")
+        return f"{_JOURS_FR.get(jour_en, jour_en)} {d.day} {_MOIS_FR.get(mois_en, mois_en)} {d.year}"
+
+    if format_affichage == "medium":
+        mois_en = d.strftime("%B")
+        return f"{d.day} {_MOIS_FR.get(mois_en, mois_en)} {d.year}"
+
+    if format_affichage == "court":
+        return d.strftime("%d/%m/%Y")
+
+    if format_affichage == "semaine":
+        jour_en = d.strftime("%a")
+        return f"{_JOURS_FR_COURT.get(jour_en, jour_en)}. {d.strftime('%d/%m')}"
+
+    return d.strftime("%d/%m/%Y")
+
+
 # --- CONFIGURATION DU THÈME VISUEL (DOIT ÊTRE AU TOUT DÉBUT) ---
 st.set_page_config(
     page_title="OmniCoord IA",
@@ -1023,7 +1076,7 @@ if onglet == "🏠 Tableau de bord":
     st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
 
     # --- Interventions du jour ---
-    st.subheader(f"📅 Interventions du jour — {aujourdhui.strftime('%A %d %B %Y').capitalize()}")
+    st.subheader(f"📅 Interventions du jour — {date_fr(aujourdhui, 'long')}")
     df_jour = charger_df("""
         SELECT i.heure_debut, i.heure_fin, i.type_intervention, i.statut,
                b.prenom || ' ' || b.nom as beneficiaire,
@@ -1579,7 +1632,7 @@ if onglet == "📅 Plannings, Tournées & Urgences":
         dimanche_semaine = lundi_semaine + datetime.timedelta(days=6)
 
         with col_nav2:
-            st.markdown(f"<div style='text-align:center; color:#4c8dfa; font-weight:700; font-size:16px;'>Semaine du {lundi_semaine.strftime('%d/%m/%Y')} au {dimanche_semaine.strftime('%d/%m/%Y')}</div>", unsafe_allow_html=True)
+            st.markdown(f"<div style='text-align:center; color:#4c8dfa; font-weight:700; font-size:16px;'>Semaine du {date_fr(lundi_semaine, 'medium')} au {date_fr(dimanche_semaine, 'medium')}</div>", unsafe_allow_html=True)
 
         if st.button("🔙 Revenir à la semaine courante", key="reset_semaine"):
             st.session_state["semaine_offset"] = 0
@@ -1597,18 +1650,18 @@ if onglet == "📅 Plannings, Tournées & Urgences":
             ORDER BY i.heure_debut
         """, (lundi_semaine.isoformat(), dimanche_semaine.isoformat(), sid))
 
-        JOURS = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
         dates_semaine = [lundi_semaine + datetime.timedelta(days=i) for i in range(7)]
 
         if df_interv3.empty:
             st.info("Aucun intervenant enregistré. Ajoutez des intervenants pour visualiser le planning.")
         else:
-            # En-tête du tableau
+            # En-tête du tableau (jours en français via date_fr)
             headers_html = '<th class="col-intervenant">Intervenant</th>'
-            for i, d in enumerate(dates_semaine):
+            for d in dates_semaine:
                 is_today = (d == aujourdhui)
                 style_today = " style='background:rgba(47,124,246,0.25); color:#4c8dfa;'" if is_today else ""
-                headers_html += f'<th{style_today}>{JOURS[i]}<br><small>{d.strftime("%d/%m")}</small></th>'
+                label = date_fr(d, "semaine")   # ex. "Ven. 21/08"
+                headers_html += f'<th{style_today}>{label}</th>'
 
             rows_html = ""
             for _, interv in df_interv3.iterrows():
