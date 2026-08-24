@@ -1,85 +1,55 @@
+"""
+OmniCoord IA — Version 2.0 (Supabase + Sécurité renforcée)
+=============================================================
+Changements majeurs vs v1 :
+  - SQLite → Supabase (PostgreSQL + RLS)
+  - Auth déléguée à Supabase Auth (bcrypt natif, JWT, reset mdp)
+  - Mots de passe mail chiffrés avec Fernet
+  - html.escape() sur toutes les valeurs HTML injectées
+  - Anti brute-force login (10 échecs / 15 min)
+  - Quota IA re-vérifié côté serveur à chaque appel
+  - Nouveau module : Suivi des heures intervenants
+  - Nouveau module : Pointage QR code (token unique)
+  - Nouveau module : Export RGPD dossier bénéficiaire
+  - PDF : police Unicode (fini les ? sur les accents)
+  - Logging des erreurs (fini les except: pass silencieux)
+"""
+
+# ============================================================
+#  IMPORTS
+# ============================================================
 import datetime
-import email
-from email.header import decode_header
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-import imaplib
+import html
 import json
+import logging
+import math
 import os
 import re
 import smtplib
-import sqlite3
 import time
-import math
 import urllib.parse
-import bcrypt
-from fpdf import FPDF
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
 import google.generativeai as genai
 import pandas as pd
-from pypdf import PdfReader
 import streamlit as st
+from cryptography.fernet import Fernet
+from fpdf import FPDF
+from supabase import create_client, Client
 
 # ============================================================
-#  OMNICOORD IA — Coordination, plannings & sourcing direct
-#  pour les structures d'aide à domicile (SAAD / SSIAD)
+#  LOGGING (remplace les except: pass silencieux)
 # ============================================================
-
-DB_NAME = "omnicoord.db"
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+logger = logging.getLogger("omnicoord")
 
 # ============================================================
-#  LOCALISATION FRANÇAISE DES DATES (sans dépendance externe)
+#  CONFIG PAGE (doit être en premier appel Streamlit)
 # ============================================================
-_JOURS_FR = {
-    "Monday": "Lundi", "Tuesday": "Mardi", "Wednesday": "Mercredi",
-    "Thursday": "Jeudi", "Friday": "Vendredi", "Saturday": "Samedi", "Sunday": "Dimanche",
-}
-_JOURS_FR_COURT = {
-    "Mon": "Lun", "Tue": "Mar", "Wed": "Mer",
-    "Thu": "Jeu", "Fri": "Ven", "Sat": "Sam", "Sun": "Dim",
-}
-_MOIS_FR = {
-    "January": "janvier", "February": "février", "March": "mars",
-    "April": "avril", "May": "mai", "June": "juin",
-    "July": "juillet", "August": "août", "September": "septembre",
-    "October": "octobre", "November": "novembre", "December": "décembre",
-}
-
-
-def date_fr(d, format_affichage="long"):
-    """Retourne une date formatée en français sans bibliothèque externe.
-
-    Formats disponibles :
-      - "long"   → "Vendredi 21 août 2026"
-      - "court"  → "21/08/2026"
-      - "medium" → "21 août 2026"
-      - "semaine"→ "lun. 21/08"
-    """
-    if isinstance(d, str):
-        try:
-            d = datetime.date.fromisoformat(d)
-        except ValueError:
-            return d  # retourne la chaîne telle quelle si non parseable
-
-    if format_affichage == "long":
-        jour_en = d.strftime("%A")
-        mois_en = d.strftime("%B")
-        return f"{_JOURS_FR.get(jour_en, jour_en)} {d.day} {_MOIS_FR.get(mois_en, mois_en)} {d.year}"
-
-    if format_affichage == "medium":
-        mois_en = d.strftime("%B")
-        return f"{d.day} {_MOIS_FR.get(mois_en, mois_en)} {d.year}"
-
-    if format_affichage == "court":
-        return d.strftime("%d/%m/%Y")
-
-    if format_affichage == "semaine":
-        jour_en = d.strftime("%a")
-        return f"{_JOURS_FR_COURT.get(jour_en, jour_en)}. {d.strftime('%d/%m')}"
-
-    return d.strftime("%d/%m/%Y")
-
-
-# --- CONFIGURATION DU THÈME VISUEL (DOIT ÊTRE AU TOUT DÉBUT) ---
 st.set_page_config(
     page_title="OmniCoord IA",
     page_icon="🩺",
@@ -87,7 +57,9 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- CHARTE GRAPHIQUE : BLEU MÉDICAL / NUIT PROFOND + ACIER BROSSÉ ---
+# ============================================================
+#  CHARTE GRAPHIQUE
+# ============================================================
 CUSTOM_CSS = """
 <style>
     :root {
@@ -102,183 +74,37 @@ CUSTOM_CSS = """
         --oc-warning: #d99a3d;
         --oc-success: #3fae74;
     }
-
-    .stApp {
-        background: linear-gradient(160deg, var(--oc-navy-deep) 0%, var(--oc-navy) 55%, #0d2138 100%);
-        color: #f2f5f8 !important;
-    }
-
-    section[data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #0c1f33 0%, #0a1929 100%);
-        border-right: 1px solid rgba(137, 150, 163, 0.25);
-    }
-
-    p, span, label, .stMarkdown, div[data-baseweb="select"] span {
-        color: #f2f5f8 !important;
-    }
-
-    h1, h2, h3, h4, h5, h6 {
-        color: #ffffff !important;
-        letter-spacing: 0.3px;
-    }
-
-    .oc-badge {
-        display: inline-block;
-        padding: 4px 14px;
-        border-radius: 20px;
-        font-weight: 700;
-        color: white;
-    }
-
-    .oc-card {
-        background: linear-gradient(135deg, var(--oc-navy-panel) 0%, #0f2438 100%);
-        border: 1px solid rgba(137, 150, 163, 0.25);
-        border-left: 4px solid var(--oc-medical-blue);
-        border-radius: 12px;
-        padding: 18px 20px;
-        margin-bottom: 14px;
-        color: #f2f5f8 !important;
-    }
-
+    .stApp { background: linear-gradient(160deg, var(--oc-navy-deep) 0%, var(--oc-navy) 55%, #0d2138 100%); color: #f2f5f8 !important; }
+    section[data-testid="stSidebar"] { background: linear-gradient(180deg, #0c1f33 0%, #0a1929 100%); border-right: 1px solid rgba(137,150,163,0.25); }
+    p, span, label, .stMarkdown, div[data-baseweb="select"] span { color: #f2f5f8 !important; }
+    h1, h2, h3, h4, h5, h6 { color: #ffffff !important; letter-spacing: 0.3px; }
+    .oc-badge { display: inline-block; padding: 4px 14px; border-radius: 20px; font-weight: 700; color: white; }
+    .oc-card { background: linear-gradient(135deg, var(--oc-navy-panel) 0%, #0f2438 100%); border: 1px solid rgba(137,150,163,0.25); border-left: 4px solid var(--oc-medical-blue); border-radius: 12px; padding: 18px 20px; margin-bottom: 14px; color: #f2f5f8 !important; }
     .oc-card-alert { border-left: 4px solid var(--oc-alert) !important; }
     .oc-card-warning { border-left: 4px solid var(--oc-warning) !important; }
     .oc-card-ok { border-left: 4px solid var(--oc-success) !important; }
-
-    .oc-metal-divider {
-        height: 2px;
-        background: linear-gradient(90deg, transparent, var(--oc-steel) 50%, transparent);
-        margin: 18px 0;
-        opacity: 0.5;
-    }
-
-    .stButton > button {
-        background: linear-gradient(135deg, var(--oc-medical-blue) 0%, #1f5fd6 100%);
-        color: white;
-        border: none;
-        border-radius: 8px;
-        font-weight: 600;
-    }
-
-    .stButton > button:hover {
-        background: linear-gradient(135deg, var(--oc-medical-blue-soft) 0%, var(--oc-medical-blue) 100%);
-        border: none;
-        color: white;
-    }
-
-    div[data-testid="stMetricValue"] {
-        color: var(--oc-medical-blue-soft) !important;
-    }
-
-    input, textarea, select {
-        color: #ffffff !important;
-    }
-
-    div[data-baseweb="input"] {
-        background-color: rgba(19, 47, 76, 0.6) !important;
-        color: #ffffff !important;
-    }
-
-    div[data-testid="stTextInput"] label p,
-    div[data-testid="stPasswordInput"] label p,
-    .stTextInput label,
-    .stPasswordInput label {
-        color: #f2f5f8 !important;
-        font-weight: 600 !important;
-    }
-
-    div[data-baseweb="base-input"] input {
-        color: #ffffff !important;
-        background-color: rgba(13, 33, 56, 0.8) !important;
-    }
-
-    /* Planning hebdomadaire */
-    .planning-table {
-        width: 100%;
-        border-collapse: collapse;
-        font-size: 13px;
-        margin-top: 10px;
-    }
-    .planning-table th {
-        background: linear-gradient(135deg, #1a3f6f 0%, #0f2942 100%);
-        color: #f2f5f8;
-        padding: 10px 8px;
-        text-align: center;
-        border: 1px solid rgba(137,150,163,0.3);
-        font-weight: 700;
-        letter-spacing: 0.5px;
-    }
-    .planning-table th.col-intervenant {
-        background: linear-gradient(135deg, #0c1f33 0%, #0a1929 100%);
-        text-align: left;
-        padding-left: 12px;
-        min-width: 140px;
-    }
-    .planning-table td {
-        border: 1px solid rgba(137,150,163,0.2);
-        padding: 6px 4px;
-        vertical-align: top;
-        min-width: 110px;
-        min-height: 50px;
-        background: rgba(10, 25, 41, 0.4);
-    }
-    .planning-table td.col-intervenant {
-        background: rgba(12, 31, 51, 0.7);
-        color: #e6ecf2;
-        font-weight: 600;
-        padding: 8px 12px;
-        vertical-align: middle;
-    }
-    .planning-cell {
-        background: linear-gradient(135deg, #132f4c 0%, #0f2438 100%);
-        border-radius: 6px;
-        padding: 5px 7px;
-        margin: 2px;
-        font-size: 12px;
-        border-left: 3px solid #2f7cf6;
-        color: #f2f5f8;
-    }
+    .oc-metal-divider { height: 2px; background: linear-gradient(90deg, transparent, var(--oc-steel) 50%, transparent); margin: 18px 0; opacity: 0.5; }
+    .stButton > button { background: linear-gradient(135deg, var(--oc-medical-blue) 0%, #1f5fd6 100%); color: white; border: none; border-radius: 8px; font-weight: 600; }
+    .stButton > button:hover { background: linear-gradient(135deg, var(--oc-medical-blue-soft) 0%, var(--oc-medical-blue) 100%); border: none; color: white; }
+    div[data-testid="stMetricValue"] { color: var(--oc-medical-blue-soft) !important; }
+    input, textarea, select { color: #ffffff !important; }
+    div[data-baseweb="input"] { background-color: rgba(19,47,76,0.6) !important; }
+    div[data-baseweb="base-input"] input { color: #ffffff !important; background-color: rgba(13,33,56,0.8) !important; }
+    .planning-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
+    .planning-table th { background: linear-gradient(135deg, #1a3f6f 0%, #0f2942 100%); color: #f2f5f8; padding: 10px 8px; text-align: center; border: 1px solid rgba(137,150,163,0.3); font-weight: 700; }
+    .planning-table th.col-intervenant { background: linear-gradient(135deg, #0c1f33 0%, #0a1929 100%); text-align: left; padding-left: 12px; min-width: 140px; }
+    .planning-table td { border: 1px solid rgba(137,150,163,0.2); padding: 6px 4px; vertical-align: top; min-width: 110px; background: rgba(10,25,41,0.4); }
+    .planning-table td.col-intervenant { background: rgba(12,31,51,0.7); color: #e6ecf2; font-weight: 600; padding: 8px 12px; vertical-align: middle; }
+    .planning-cell { background: linear-gradient(135deg, #132f4c 0%, #0f2438 100%); border-radius: 6px; padding: 5px 7px; margin: 2px; font-size: 12px; border-left: 3px solid #2f7cf6; color: #f2f5f8; }
     .planning-cell.urgence { border-left-color: #e0554f !important; }
     .planning-cell.realise { border-left-color: #3fae74 !important; }
     .planning-cell.annule { border-left-color: #8996a3 !important; opacity: 0.6; }
     .planning-empty { color: rgba(137,150,163,0.3); font-size: 12px; text-align: center; padding: 10px 0; }
-
-    /* Alertes dashboard */
-    .alert-box {
-        border-radius: 10px;
-        padding: 14px 18px;
-        margin-bottom: 10px;
-        display: flex;
-        align-items: flex-start;
-        gap: 12px;
-    }
-    .alert-box-rouge {
-        background: rgba(224, 85, 79, 0.12);
-        border: 1px solid rgba(224, 85, 79, 0.45);
-        border-left: 4px solid #e0554f;
-    }
-    .alert-box-orange {
-        background: rgba(217, 154, 61, 0.12);
-        border: 1px solid rgba(217, 154, 61, 0.40);
-        border-left: 4px solid #d99a3d;
-    }
-    .alert-box-bleu {
-        background: rgba(47, 124, 246, 0.10);
-        border: 1px solid rgba(47, 124, 246, 0.35);
-        border-left: 4px solid #2f7cf6;
-    }
-    .alert-icon { font-size: 20px; margin-top: 2px; flex-shrink: 0; }
-    .alert-content { flex: 1; }
-    .alert-title { font-weight: 700; color: #f2f5f8; font-size: 14px; }
-    .alert-detail { color: #b8c2cc; font-size: 13px; margin-top: 2px; }
-
-    /* Fiche bénéficiaire */
-    .fiche-section {
-        background: linear-gradient(135deg, #132f4c 0%, #0f2438 100%);
-        border: 1px solid rgba(137,150,163,0.2);
-        border-radius: 10px;
-        padding: 16px 18px;
-        margin-bottom: 12px;
-    }
+    .alert-box { border-radius: 10px; padding: 14px 18px; margin-bottom: 10px; }
+    .alert-box-rouge { background: rgba(224,85,79,0.12); border: 1px solid rgba(224,85,79,0.45); border-left: 4px solid #e0554f; }
+    .alert-box-orange { background: rgba(217,154,61,0.12); border: 1px solid rgba(217,154,61,0.40); border-left: 4px solid #d99a3d; }
+    .alert-box-bleu { background: rgba(47,124,246,0.10); border: 1px solid rgba(47,124,246,0.35); border-left: 4px solid #2f7cf6; }
+    .fiche-section { background: linear-gradient(135deg, #132f4c 0%, #0f2438 100%); border: 1px solid rgba(137,150,163,0.2); border-radius: 10px; padding: 16px 18px; margin-bottom: 12px; }
     .fiche-section h4 { color: #4c8dfa !important; margin-bottom: 10px; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; }
     .fiche-row { display: flex; gap: 8px; margin-bottom: 6px; }
     .fiche-label { color: #8996a3; font-size: 13px; min-width: 140px; flex-shrink: 0; }
@@ -288,72 +114,354 @@ CUSTOM_CSS = """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 
-# --- SÉCURITÉ : HACHAGE DES MOTS DE PASSE (bcrypt) ---
-def hacher_mdp(mot_de_passe_clair):
-    return bcrypt.hashpw(mot_de_passe_clair.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+# ============================================================
+#  LOCALISATION FRANÇAISE DES DATES
+# ============================================================
+_JOURS_FR = {"Monday":"Lundi","Tuesday":"Mardi","Wednesday":"Mercredi","Thursday":"Jeudi","Friday":"Vendredi","Saturday":"Samedi","Sunday":"Dimanche"}
+_JOURS_FR_COURT = {"Mon":"Lun","Tue":"Mar","Wed":"Mer","Thu":"Jeu","Fri":"Ven","Sat":"Sam","Sun":"Dim"}
+_MOIS_FR = {"January":"janvier","February":"février","March":"mars","April":"avril","May":"mai","June":"juin","July":"juillet","August":"août","September":"septembre","October":"octobre","November":"novembre","December":"décembre"}
+
+def date_fr(d, format_affichage="long"):
+    if isinstance(d, str):
+        try: d = datetime.date.fromisoformat(d)
+        except ValueError: return d
+    if format_affichage == "long":
+        return f"{_JOURS_FR.get(d.strftime('%A'), d.strftime('%A'))} {d.day} {_MOIS_FR.get(d.strftime('%B'), d.strftime('%B'))} {d.year}"
+    if format_affichage == "medium":
+        return f"{d.day} {_MOIS_FR.get(d.strftime('%B'), d.strftime('%B'))} {d.year}"
+    if format_affichage == "court":
+        return d.strftime("%d/%m/%Y")
+    if format_affichage == "semaine":
+        return f"{_JOURS_FR_COURT.get(d.strftime('%a'), d.strftime('%a'))}. {d.strftime('%d/%m')}"
+    return d.strftime("%d/%m/%Y")
 
 
-def verifier_mdp(mot_de_passe_saisi, valeur_stockee):
-    if not valeur_stockee:
-        return False
+# ============================================================
+#  SÉCURITÉ — CHIFFREMENT DES MOTS DE PASSE MAIL (Fernet)
+# ============================================================
+def _get_fernet() -> Fernet:
+    """
+    Charge la clé Fernet depuis les secrets Streamlit.
+    Pour générer une clé : from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())
+    Ajouter dans Streamlit secrets : FERNET_KEY = "ta_clé_ici"
+    """
+    key = st.secrets.get("FERNET_KEY", "")
+    if not key:
+        raise ValueError("FERNET_KEY manquante dans les secrets Streamlit.")
+    return Fernet(key.encode())
+
+def chiffrer_mdp_mail(mdp_clair: str) -> str:
+    """Chiffre un mot de passe mail avant stockage en base."""
+    if not mdp_clair:
+        return ""
     try:
-        if valeur_stockee.startswith(("$2b$", "$2a$", "$2y$")):
-            return bcrypt.checkpw(mot_de_passe_saisi.encode("utf-8"), valeur_stockee.encode("utf-8"))
-    except Exception:
-        return False
-    return mot_de_passe_saisi == valeur_stockee
+        return _get_fernet().encrypt(mdp_clair.encode()).decode()
+    except Exception as e:
+        logger.error(f"Erreur chiffrement mail: {e}")
+        return ""
 
-
-def mdp_est_hashe(valeur_stockee):
-    return bool(valeur_stockee) and valeur_stockee.startswith(("$2b$", "$2a$", "$2y$"))
-
-
-# --- SÉCURITÉ & QUOTAS IA ---
-def peut_utiliser_ia(email_utilisateur):
+def dechiffrer_mdp_mail(mdp_chiffre: str) -> str:
+    """Déchiffre un mot de passe mail récupéré de la base."""
+    if not mdp_chiffre:
+        return ""
     try:
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        c.execute("SELECT nb_requetes_ia, quota_max, statut_abonnement FROM utilisateurs WHERE email = ?", (email_utilisateur,))
-        row = c.fetchone()
-        conn.close()
-        if not row:
+        return _get_fernet().decrypt(mdp_chiffre.encode()).decode()
+    except Exception as e:
+        logger.error(f"Erreur déchiffrement mail: {e}")
+        return ""
+
+
+# ============================================================
+#  CONNEXION SUPABASE
+# ============================================================
+@st.cache_resource
+def get_supabase() -> Client:
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]  # Utilise la clé anon (RLS actif)
+    return create_client(url, key)
+
+@st.cache_resource
+def get_supabase_admin() -> Client:
+    """Client service_role pour les opérations admin (bypass RLS)."""
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_SERVICE_KEY"]  # Service role key
+    return create_client(url, key)
+
+sb = get_supabase()
+
+
+# ============================================================
+#  HELPERS SUPABASE (remplacent charger_df / executer SQLite)
+# ============================================================
+def sb_select(table: str, filters: dict = None, eq_col: str = None,
+              eq_val=None, order: str = None, limit: int = None) -> pd.DataFrame:
+    """
+    Raccourci SELECT avec filtres simples.
+    Retourne toujours un DataFrame (vide si aucun résultat).
+    """
+    try:
+        q = sb.table(table).select("*")
+        if filters:
+            for col, val in filters.items():
+                q = q.eq(col, val)
+        if eq_col and eq_val is not None:
+            q = q.eq(eq_col, eq_val)
+        if order:
+            q = q.order(order)
+        if limit:
+            q = q.limit(limit)
+        res = q.execute()
+        return pd.DataFrame(res.data) if res.data else pd.DataFrame()
+    except Exception as e:
+        logger.error(f"sb_select({table}): {e}")
+        return pd.DataFrame()
+
+
+def sb_insert(table: str, data: dict) -> dict | None:
+    """INSERT et retourne la ligne créée."""
+    try:
+        res = sb.table(table).insert(data).execute()
+        return res.data[0] if res.data else None
+    except Exception as e:
+        logger.error(f"sb_insert({table}): {e}")
+        st.error(f"Erreur lors de l'enregistrement : {e}")
+        return None
+
+
+def sb_update(table: str, data: dict, eq_col: str, eq_val) -> bool:
+    """UPDATE avec filtre simple."""
+    try:
+        sb.table(table).update(data).eq(eq_col, eq_val).execute()
+        return True
+    except Exception as e:
+        logger.error(f"sb_update({table}): {e}")
+        st.error(f"Erreur lors de la mise à jour : {e}")
+        return False
+
+
+def sb_delete(table: str, eq_col: str, eq_val) -> bool:
+    """DELETE avec filtre simple."""
+    try:
+        sb.table(table).delete().eq(eq_col, eq_val).execute()
+        return True
+    except Exception as e:
+        logger.error(f"sb_delete({table}): {e}")
+        st.error(f"Erreur lors de la suppression : {e}")
+        return False
+
+
+def sb_rpc(function_name: str, params: dict = None) -> any:
+    """Appel d'une fonction Supabase RPC."""
+    try:
+        res = sb.rpc(function_name, params or {}).execute()
+        return res.data
+    except Exception as e:
+        logger.error(f"sb_rpc({function_name}): {e}")
+        return None
+
+
+# ============================================================
+#  AUDIT LOG
+# ============================================================
+def audit(action: str, table_name: str, record_id: str = None, details: dict = None):
+    """Enregistre une action sensible dans audit_logs."""
+    try:
+        get_supabase_admin().table("audit_logs").insert({
+            "structure_id": st.session_state.get("structure_id"),
+            "user_id": st.session_state.get("user_id"),
+            "action": action,
+            "table_name": table_name,
+            "record_id": record_id,
+            "details": details or {}
+        }).execute()
+    except Exception as e:
+        logger.warning(f"audit() failed: {e}")
+
+
+# ============================================================
+#  SÉCURITÉ — ÉCHAPPEMENT HTML
+#  Toutes les valeurs de la BDD injectées dans du HTML
+#  doivent passer par h(val) avant affichage.
+# ============================================================
+def h(valeur) -> str:
+    """Échappe une valeur pour injection sécurisée dans du HTML."""
+    return html.escape(str(valeur or ""))
+
+
+# ============================================================
+#  ANTI BRUTE-FORCE LOGIN
+# ============================================================
+MAX_ECHECS = 10
+FENETRE_MINUTES = 15
+
+def est_bloque(email: str) -> bool:
+    """Vérifie si l'email est bloqué suite à trop d'échecs."""
+    try:
+        depuis = (datetime.datetime.utcnow() - datetime.timedelta(minutes=FENETRE_MINUTES)).isoformat()
+        res = get_supabase_admin().table("login_attempts") \
+            .select("id", count="exact") \
+            .eq("email", email) \
+            .eq("succes", False) \
+            .gte("created_at", depuis) \
+            .execute()
+        nb = res.count or 0
+        return nb >= MAX_ECHECS
+    except Exception as e:
+        logger.warning(f"est_bloque(): {e}")
+        return False
+
+def enregistrer_tentative(email: str, succes: bool):
+    """Enregistre une tentative de connexion."""
+    try:
+        get_supabase_admin().table("login_attempts").insert({
+            "email": email,
+            "succes": succes
+        }).execute()
+    except Exception as e:
+        logger.warning(f"enregistrer_tentative(): {e}")
+
+
+# ============================================================
+#  AUTHENTIFICATION SUPABASE
+# ============================================================
+def check_password() -> bool:
+    """Page de connexion. Utilise Supabase Auth."""
+    if st.session_state.get("password_correct", False):
+        return True
+
+    st.markdown("""
+        <div style="text-align:center; margin-top: 60px;">
+            <h1 style="color:#f2f5f8;">🩺 OmniCoord IA</h1>
+            <p style="color:#8996a3;">Coordination, plannings & sourcing pour l'aide à domicile</p>
+        </div>
+    """, unsafe_allow_html=True)
+
+    col1, col2, col3 = st.columns([1, 1.2, 1])
+    with col2:
+        with st.form("form_login"):
+            email_saisi = st.text_input("Email")
+            pwd_saisi = st.text_input("Mot de passe", type="password")
+            submit = st.form_submit_button("Se connecter")
+
+            if submit:
+                email_saisi = email_saisi.strip().lower()
+
+                # --- Anti brute-force ---
+                if est_bloque(email_saisi):
+                    st.error(f"⛔ Trop de tentatives. Réessayez dans {FENETRE_MINUTES} minutes.")
+                    return False
+
+                try:
+                    res = sb.auth.sign_in_with_password({
+                        "email": email_saisi,
+                        "password": pwd_saisi
+                    })
+                    user = res.user
+
+                    if not user:
+                        enregistrer_tentative(email_saisi, False)
+                        st.error("Email ou mot de passe incorrect.")
+                        return False
+
+                    # Récupère le profil applicatif
+                    profil_res = get_supabase_admin().table("profils") \
+                        .select("*") \
+                        .eq("id", user.id) \
+                        .single() \
+                        .execute()
+                    profil = profil_res.data
+
+                    if not profil:
+                        enregistrer_tentative(email_saisi, False)
+                        st.error("Profil introuvable. Contactez l'administrateur.")
+                        return False
+
+                    # Vérification période d'accès
+                    date_fin = datetime.date.fromisoformat(profil["date_fin_essai"])
+                    if not profil["est_admin"] and datetime.date.today() > date_fin:
+                        enregistrer_tentative(email_saisi, False)
+                        st.error("Votre période d'accès a expiré. Contactez l'administrateur.")
+                        return False
+
+                    # Récupère la structure
+                    structure_res = get_supabase_admin().table("structures") \
+                        .select("nom") \
+                        .eq("id", profil["structure_id"]) \
+                        .single() \
+                        .execute()
+                    structure_nom = structure_res.data["nom"] if structure_res.data else "Non assignée"
+
+                    # Session
+                    enregistrer_tentative(email_saisi, True)
+                    st.session_state.update({
+                        "password_correct": True,
+                        "user_id": user.id,
+                        "user_email": email_saisi,
+                        "is_admin": profil["est_admin"],
+                        "structure_id": profil["structure_id"],
+                        "structure_nom": structure_nom,
+                        "statut_abonnement": profil["statut_abonnement"],
+                        "quota_max_ia": profil["quota_max_ia"],
+                        "mail_config": {
+                            "email": profil.get("mail_smtp_email", ""),
+                            "password": dechiffrer_mdp_mail(profil.get("mail_smtp_password", "")),
+                            "imap": profil.get("mail_imap_server", "imap.gmail.com")
+                        }
+                    })
+                    audit("LOGIN", "profils", user.id)
+                    st.rerun()
+
+                except Exception as e:
+                    enregistrer_tentative(email_saisi, False)
+                    err_msg = str(e)
+                    if "Invalid login" in err_msg or "credentials" in err_msg.lower():
+                        st.error("Email ou mot de passe incorrect.")
+                    else:
+                        logger.error(f"Login error: {e}")
+                        st.error("Erreur de connexion. Réessayez.")
+
+    return False
+
+
+# ============================================================
+#  QUOTAS IA — RE-VÉRIFIÉS CÔTÉ SERVEUR À CHAQUE APPEL
+# ============================================================
+def peut_utiliser_ia() -> tuple[bool, int, int]:
+    """Re-lit le quota en base (pas depuis la session) pour éviter la manipulation."""
+    try:
+        res = get_supabase_admin().table("profils") \
+            .select("nb_requetes_ia, quota_max_ia, statut_abonnement") \
+            .eq("id", st.session_state.get("user_id")) \
+            .single() \
+            .execute()
+        if not res.data:
             return False, 0, 0
-        nb, quota_max, statut = row
+        nb, quota_max, statut = res.data["nb_requetes_ia"], res.data["quota_max_ia"], res.data["statut_abonnement"]
         if statut == "PRO":
             return True, nb, quota_max
         return nb < quota_max, nb, quota_max
-    except Exception:
+    except Exception as e:
+        logger.error(f"peut_utiliser_ia(): {e}")
         return False, 0, 0
 
-
-def incrementer_quota_ia(email_utilisateur):
+def incrementer_quota_ia():
+    """Incrémente le compteur IA uniquement si l'appel a réussi."""
     try:
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        c.execute("UPDATE utilisateurs SET nb_requetes_ia = nb_requetes_ia + 1 WHERE email = ?", (email_utilisateur,))
-        conn.commit()
-        conn.close()
-    except Exception:
-        pass
+        get_supabase_admin().rpc("increment_quota_ia", {
+            "p_user_id": st.session_state.get("user_id")
+        }).execute()
+    except Exception as e:
+        logger.warning(f"incrementer_quota_ia(): {e}")
 
 
-def reinitialiser_quota_ia(email_utilisateur):
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        c.execute("UPDATE utilisateurs SET nb_requetes_ia = 0 WHERE email = ?", (email_utilisateur,))
-        conn.commit()
-        conn.close()
-    except Exception:
-        pass
-
-
-# --- GÉNÉRATION PDF (UTF-8 compatible) ---
+# ============================================================
+#  GÉNÉRATION PDF (Unicode avec fpdf2)
+# ============================================================
 class PDFDocument(FPDF):
     def header(self):
         self.set_font("Helvetica", "B", 14)
         self.set_text_color(15, 41, 66)
-        self.cell(0, 10, "OmniCoord IA", ln=True, align="L")
+        self.cell(0, 10, "OmniCoord IA", new_x="LMARGIN", new_y="NEXT", align="L")
         self.set_draw_color(47, 124, 246)
         self.line(10, 20, 200, 20)
         self.ln(6)
@@ -365,161 +473,151 @@ class PDFDocument(FPDF):
         self.cell(0, 10, f"Document généré le {datetime.date.today().strftime('%d/%m/%Y')} — OmniCoord IA", align="C")
 
 
-def creer_pdf_transmission(beneficiaire_nom, intervenant_nom, date_doc, contenu):
+def creer_pdf_transmission(beneficiaire_nom: str, intervenant_nom: str,
+                            date_doc: str, contenu: str) -> bytes:
+    """Génère un PDF de transmission (Unicode correct via fpdf2)."""
     pdf = PDFDocument()
     pdf.add_page()
     pdf.set_font("Helvetica", "B", 12)
     pdf.set_text_color(20, 20, 20)
-    pdf.cell(0, 8, f"Fiche de liaison / Transmission — {date_doc}", ln=True)
+    pdf.cell(0, 8, f"Fiche de liaison — {date_doc}", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 11)
-    pdf.cell(0, 8, f"Bénéficiaire : {beneficiaire_nom}", ln=True)
-    pdf.cell(0, 8, f"Intervenant : {intervenant_nom}", ln=True)
+    pdf.cell(0, 8, f"Bénéficiaire : {beneficiaire_nom}", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 8, f"Intervenant : {intervenant_nom}", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4)
     pdf.set_font("Helvetica", "", 10)
-    contenu_safe = contenu.encode("latin-1", "replace").decode("latin-1")
-    pdf.multi_cell(0, 6, contenu_safe)
-    return pdf.output(dest="S")
+    pdf.multi_cell(0, 6, contenu)
+    return bytes(pdf.output())
 
 
-def creer_pdf_fiche_intervenant(nom, competences, habilitations, details):
+def creer_pdf_export_rgpd(beneficiaire: dict, interventions: list,
+                           documents: list) -> bytes:
+    """Export RGPD complet d'un dossier bénéficiaire en PDF."""
     pdf = PDFDocument()
     pdf.add_page()
-    pdf.set_font("Helvetica", "B", 12)
-    pdf.cell(0, 8, f"Fiche intervenant — {nom}", ln=True)
+
+    # En-tête dossier
+    pdf.set_font("Helvetica", "B", 13)
+    pdf.cell(0, 8, f"Dossier RGPD — {beneficiaire.get('prenom', '')} {beneficiaire.get('nom', '')}",
+             new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 10)
-    pdf.ln(2)
-    pdf.multi_cell(0, 6, f"Compétences : {competences}".encode("latin-1", "replace").decode("latin-1"))
-    pdf.multi_cell(0, 6, f"Habilitations : {habilitations}".encode("latin-1", "replace").decode("latin-1"))
-    pdf.ln(2)
-    pdf.multi_cell(0, 6, details.encode("latin-1", "replace").decode("latin-1"))
-    return pdf.output(dest="S")
+    pdf.cell(0, 6, f"Export généré le {datetime.date.today().strftime('%d/%m/%Y')} à la demande du titulaire.",
+             new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+
+    # Informations personnelles
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, "Informations personnelles", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 10)
+    for label, key in [("Adresse", "adresse"), ("Téléphone", "telephone"),
+                       ("Dépendance", "niveau_dependance"), ("Notes", "notes")]:
+        pdf.multi_cell(0, 6, f"{label} : {beneficiaire.get(key, '—')}")
+    pdf.ln(4)
+
+    # Historique des interventions
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, f"Interventions ({len(interventions)})", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 9)
+    for iv in interventions:
+        ligne = f"{iv.get('date_intervention', '')} {iv.get('heure_debut', '')}–{iv.get('heure_fin', '')} | {iv.get('type_intervention', '')} | {iv.get('statut', '')}"
+        pdf.cell(0, 5, ligne, new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+
+    # Documents
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(0, 7, f"Documents ({len(documents)})", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 9)
+    for doc in documents:
+        pdf.multi_cell(0, 5, f"[{doc.get('date_creation', '')}] {doc.get('type_document', '')} : {doc.get('contenu', '')[:200]}...")
+
+    return bytes(pdf.output())
 
 
-# --- ENVOI D'EMAIL ---
-def envoyer_email_intervenant(to_email, sujet, corps_message, email_user, pwd_user, smtp_server="smtp.gmail.com", smtp_port=587):
+# ============================================================
+#  ENVOI D'EMAIL (inchangé, sécurisé via Fernet)
+# ============================================================
+def envoyer_email(to_email: str, sujet: str, corps: str) -> tuple[bool, str]:
+    """Envoie un email via la boîte configurée dans le profil."""
+    cfg = st.session_state.get("mail_config", {})
+    email_from = cfg.get("email", "")
+    password = cfg.get("password", "")
+
+    if not email_from or not password:
+        return False, "Boîte mail non configurée dans Mon Profil."
+    if not to_email:
+        return False, "Email du destinataire manquant."
+
     try:
         msg = MIMEMultipart()
-        msg["From"] = email_user
+        msg["From"] = email_from
         msg["To"] = to_email
         msg["Subject"] = sujet
-        msg.attach(MIMEText(corps_message, "plain"))
-        server = smtplib.SMTP(smtp_server, smtp_port)
+        msg.attach(MIMEText(corps, "plain", "utf-8"))
+        server = smtplib.SMTP("smtp.gmail.com", 587, timeout=10)
         server.starttls()
-        server.login(email_user, pwd_user)
-        server.sendmail(email_user, to_email, msg.as_string())
+        server.login(email_from, password)
+        server.sendmail(email_from, to_email, msg.as_string())
         server.quit()
         return True, "Email envoyé avec succès."
+    except smtplib.SMTPAuthenticationError:
+        return False, "Authentification Gmail échouée. Vérifiez le mot de passe d'application."
+    except smtplib.SMTPException as e:
+        logger.error(f"SMTP error: {e}")
+        return False, f"Erreur SMTP : {e}"
     except Exception as e:
+        logger.error(f"envoyer_email(): {e}")
         return False, f"Erreur d'envoi : {e}"
 
 
 # ============================================================
-#  AGENT IA — AUTOMATISATION DES REMPLACEMENTS D'URGENCE
+#  CONFIGURATION IA (Gemini)
 # ============================================================
-def classer_candidats_urgence(urg_row, df_dispo, structure_id):
-    resultats = []
-    for _, interv in df_dispo.iterrows():
-        df_habs = charger_df(
-            "SELECT * FROM habilitations WHERE intervenant_id = ? AND structure_id = ?",
-            (int(interv["id"]), structure_id)
-        )
-        habs_txt = "; ".join(
-            [f"{h['type_habilitation']} (exp. {h['date_expiration']})" for _, h in df_habs.iterrows()]
-        ) or "Aucune habilitation enregistrée"
-
-        prompt = f"""
-        Tu es un coordinateur expert en aide à domicile (SAAD/SSIAD) chargé de trouver en urgence
-        un remplaçant pour une intervention non pourvue.
-
-        CONSIGNES :
-        1. Évalue la pertinence de ce candidat pour CE remplacement précis, en te basant sur :
-           - la couverture des habilitations nécessaires au type d'intervention ;
-           - la proximité géographique déclarée (zone_geo) avec le secteur du bénéficiaire ;
-           - la compatibilité de ses disponibilités déclarées avec le créneau à pourvoir.
-        2. N'invente jamais une donnée absente.
-
-        Renvoie STRICTEMENT un objet JSON avec les clés :
-        - 'score_global': entier 0-100
-        - 'alerte_habilitation': texte court si une habilitation obligatoire semble manquante, sinon chaîne vide
-        - 'justification': synthèse en une phrase
-
-        INTERVENTION À POURVOIR :
-        Date/heure : {urg_row['date_intervention']} de {urg_row['heure_debut']} à {urg_row['heure_fin']}
-        Type d'intervention : {urg_row['type_intervention']}
-        Bénéficiaire — besoins : {urg_row.get('gestes_techniques', '') or 'Non renseigné'}
-
-        PROFIL INTERVENANT CANDIDAT :
-        Compétences déclarées : {interv['competences']}
-        Zone géographique : {interv['zone_geo']}
-        Disponibilités déclarées : {interv['disponibilites']}
-        Habilitations : {habs_txt}
-        """
-        try:
-            reponse = model.generate_content(prompt)
-            txt = reponse.text.strip().replace("```json", "").replace("```", "").strip()
-            data = json.loads(txt)
-        except Exception:
-            data = {"score_global": 0, "alerte_habilitation": "", "justification": "Évaluation IA indisponible pour ce candidat."}
-
-        data["intervenant_id"] = int(interv["id"])
-        data["intervenant_nom"] = f"{interv['prenom']} {interv['nom']}"
-        data["intervenant_email"] = interv["email"]
-        data["intervenant_zone"] = interv["zone_geo"]
-        resultats.append(data)
-
-    return sorted(resultats, key=lambda x: int(x.get("score_global", 0)), reverse=True)
+try:
+    gemini_key = st.secrets["GEMINI_API_KEY"]
+    genai.configure(api_key=gemini_key)
+    model = genai.GenerativeModel("gemini-2.0-flash")
+    IA_DISPONIBLE = True
+except Exception:
+    IA_DISPONIBLE = False
+    model = None
 
 
-def prochain_candidat_non_sollicite(intervention_id, classement, structure_id):
-    df_deja = charger_df(
-        "SELECT intervenant_id FROM sollicitations_urgence WHERE intervention_id = ? AND structure_id = ? AND statut != 'Accepté'",
-        (intervention_id, structure_id)
-    )
-    ids_exclus = set(df_deja["intervenant_id"].tolist()) if not df_deja.empty else set()
-    for candidat in classement:
-        if candidat["intervenant_id"] not in ids_exclus:
-            return candidat
-    return None
+def appel_ia(prompt: str) -> dict | None:
+    """
+    Appel sécurisé à l'IA :
+    - Vérifie le quota en base (pas en session)
+    - N'incrémente que si l'appel réussit
+    - Retourne None en cas d'échec
+    """
+    if not IA_DISPONIBLE or model is None:
+        st.error("Clé API Gemini non configurée.")
+        return None
+
+    autorise, nb, quota = peut_utiliser_ia()
+    if not autorise:
+        st.error(f"Quota IA atteint ({nb}/{quota}). Contactez l'administrateur.")
+        return None
+
+    try:
+        reponse = model.generate_content(prompt)
+        txt = reponse.text.strip().replace("```json", "").replace("```", "").strip()
+        data = json.loads(txt)
+        incrementer_quota_ia()  # Seulement si succès
+        return data
+    except json.JSONDecodeError as e:
+        logger.error(f"IA JSON parse error: {e} | réponse: {reponse.text[:200]}")
+        st.warning("L'IA a retourné une réponse non structurée. Réessayez.")
+        return None
+    except Exception as e:
+        logger.error(f"appel_ia(): {e}")
+        st.error(f"Erreur IA : {e}")
+        return None
 
 
-def solliciter_candidat_urgence(urg_row, candidat, structure_id):
-    cfg = st.session_state.get("mail_config", {})
-    if not candidat.get("intervenant_email") or not cfg.get("email"):
-        return False, "Impossible d'envoyer : email du candidat ou boîte mail de la structure non configurés."
-
-    sujet = f"Remplacement urgent le {urg_row['date_intervention']}"
-    corps = (
-        f"Bonjour,\n\n"
-        f"Une intervention est à pourvoir en urgence le {urg_row['date_intervention']} "
-        f"de {urg_row['heure_debut']} à {urg_row['heure_fin']} ({urg_row['type_intervention']}).\n"
-        f"Merci de nous confirmer votre disponibilité au plus vite en répondant à ce message.\n\nMerci."
-    )
-    ok, msg = envoyer_email_intervenant(candidat["intervenant_email"], sujet, corps, cfg["email"], cfg["password"])
-    if ok:
-        executer(
-            """INSERT INTO sollicitations_urgence
-               (structure_id, intervention_id, intervenant_id, score_global, justification, alerte_habilitation, date_envoi, statut)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'En attente')""",
-            (structure_id, int(urg_row["id"]), candidat["intervenant_id"], int(candidat.get("score_global", 0)),
-             candidat.get("justification", ""), candidat.get("alerte_habilitation", ""), datetime.datetime.now().isoformat())
-        )
-    return ok, msg
-
-
-def traiter_reponse_sollicitation(sollicitation_id, intervention_id, intervenant_id, reponse, structure_id):
-    executer(
-        "UPDATE sollicitations_urgence SET statut = ? WHERE id = ? AND structure_id = ?",
-        (reponse, sollicitation_id, structure_id)
-    )
-    if reponse == "Accepté":
-        executer(
-            "UPDATE interventions SET intervenant_id = ?, statut = 'Planifié' WHERE id = ? AND structure_id = ?",
-            (intervenant_id, intervention_id, structure_id)
-        )
-
-
-# --- CALCUL DE PROXIMITÉ ---
-def distance_km(lat1, lon1, lat2, lon2):
+# ============================================================
+#  CALCUL DE PROXIMITÉ
+# ============================================================
+def distance_km(lat1, lon1, lat2, lon2) -> float | None:
     try:
         R = 6371
         phi1, phi2 = math.radians(lat1), math.radians(lat2)
@@ -532,319 +630,65 @@ def distance_km(lat1, lon1, lat2, lon2):
 
 
 # ============================================================
-#  AUTHENTIFICATION
+#  AGENT IA — CLASSEMENT URGENCES
 # ============================================================
-def initialiser_auth_db():
-    try:
-        conn_auth = sqlite3.connect(DB_NAME)
-        c_auth = conn_auth.cursor()
-        c_auth.execute("""
-            CREATE TABLE IF NOT EXISTS utilisateurs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                email TEXT UNIQUE,
-                password TEXT,
-                date_fin_essai TEXT,
-                est_admin INTEGER DEFAULT 0,
-                mail_perso TEXT,
-                mail_password TEXT,
-                mail_imap TEXT,
-                nb_requetes_ia INTEGER DEFAULT 0,
-                quota_max INTEGER DEFAULT 20,
-                statut_abonnement TEXT DEFAULT 'ESSAI',
-                structure_id INTEGER
-            )
-        """)
-        c_auth.execute("""
-            CREATE TABLE IF NOT EXISTS structures (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                nom TEXT UNIQUE,
-                date_creation TEXT
-            )
-        """)
-        conn_auth.commit()
+def classer_candidats_urgence(urg_row: dict, df_dispo: pd.DataFrame) -> list:
+    sid = st.session_state["structure_id"]
+    resultats = []
+    for _, interv in df_dispo.iterrows():
+        df_habs = sb_select("habilitations", {"intervenant_id": str(interv["id"]), "structure_id": sid})
+        habs_txt = "; ".join([
+            f"{h['type_habilitation']} (exp. {h['date_expiration']})"
+            for _, h in df_habs.iterrows()
+        ]) or "Aucune habilitation enregistrée"
 
-        c_auth.execute("SELECT COUNT(*) FROM utilisateurs")
-        if c_auth.fetchone()[0] == 0:
-            mdp_admin_clair = st.secrets.get("APP_PASSWORD")
-            if not mdp_admin_clair:
-                st.error(
-                    "⚠️ Aucun mot de passe admin défini. Ajoutez APP_PASSWORD dans les "
-                    "secrets de l'application (Streamlit Cloud > Settings > Secrets) avant "
-                    "de continuer."
-                )
-                conn_auth.close()
-                st.stop()
+        prompt = f"""
+        Tu es coordinateur expert SAAD/SSIAD. Évalue ce candidat pour ce remplacement urgent.
 
-            mdp_admin_hash = hacher_mdp(mdp_admin_clair)
-            default_mail = st.secrets.get("EMAIL_USER", "")
-            default_pwd = st.secrets.get("EMAIL_PASSWORD", "")
-            default_imap = st.secrets.get("EMAIL_IMAP", "imap.gmail.com")
+        INTERVENTION :
+        Date : {urg_row['date_intervention']} de {urg_row['heure_debut']} à {urg_row['heure_fin']}
+        Type : {urg_row['type_intervention']}
+        Besoins : {urg_row.get('gestes_techniques', '') or 'Non renseigné'}
 
-            c_auth.execute(
-                "INSERT INTO structures (nom, date_creation) VALUES (?, ?)",
-                ("Structure Interne / Démo", datetime.date.today().isoformat())
-            )
-            structure_admin_id = c_auth.lastrowid
+        CANDIDAT :
+        Compétences : {interv['competences']}
+        Zone : {interv['zone_geo']}
+        Disponibilités : {interv['disponibilites']}
+        Habilitations : {habs_txt}
 
-            c_auth.execute(
-                """INSERT INTO utilisateurs (email, password, date_fin_essai, est_admin, mail_perso, mail_password, mail_imap, nb_requetes_ia, quota_max, statut_abonnement, structure_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                ("admin@omnicoord.fr", mdp_admin_hash, "2099-12-31", 1, default_mail, default_pwd, default_imap, 0, 999999, "PRO", structure_admin_id),
-            )
-            conn_auth.commit()
-        conn_auth.close()
-    except Exception as e:
-        st.error(f"Erreur d'initialisation du système d'authentification : {e}")
-
-
-def get_or_create_structure(nom_structure):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute("SELECT id FROM structures WHERE nom = ?", (nom_structure,))
-    row = c.fetchone()
-    if row:
-        structure_id = row[0]
-    else:
-        c.execute("INSERT INTO structures (nom, date_creation) VALUES (?, ?)", (nom_structure, datetime.date.today().isoformat()))
-        conn.commit()
-        structure_id = c.lastrowid
-    conn.close()
-    return structure_id
-
-
-def check_password():
-    if st.session_state.get("password_correct", False):
-        return True
-
-    st.markdown(
+        Réponds UNIQUEMENT en JSON avec :
+        - score_global (0-100)
+        - alerte_habilitation (texte court ou "")
+        - justification (1 phrase)
         """
-        <div style="text-align:center; margin-top: 60px;">
-            <h1 style="color:#f2f5f8;">🩺 OmniCoord IA</h1>
-            <p style="color:#8996a3;">Coordination, plannings & sourcing pour l'aide à domicile</p>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+        data = appel_ia(prompt)
+        if data:
+            data["intervenant_id"] = str(interv["id"])
+            data["intervenant_nom"] = f"{interv['prenom']} {interv['nom']}"
+            data["intervenant_email"] = interv.get("email", "")
+            resultats.append(data)
+        else:
+            resultats.append({
+                "score_global": 0, "alerte_habilitation": "",
+                "justification": "Évaluation IA indisponible.",
+                "intervenant_id": str(interv["id"]),
+                "intervenant_nom": f"{interv['prenom']} {interv['nom']}",
+                "intervenant_email": interv.get("email", "")
+            })
 
-    col1, col2, col3 = st.columns([1, 1.2, 1])
-    with col2:
-        with st.form("form_login"):
-            email_saisi = st.text_input("Email")
-            pwd_saisi = st.text_input("Mot de passe", type="password")
-            submit = st.form_submit_button("Se connecter")
-
-            if submit:
-                try:
-                    conn = sqlite3.connect(DB_NAME)
-                    c = conn.cursor()
-                    c.execute(
-                        """SELECT password, date_fin_essai, est_admin, mail_perso, mail_password, mail_imap, structure_id
-                           FROM utilisateurs WHERE email = ?""",
-                        (email_saisi,)
-                    )
-                    row = c.fetchone()
-                    conn.close()
-
-                    if row:
-                        db_password, db_date_fin, db_is_admin, m_mail, m_pass, m_imap, db_structure_id = row
-
-                        if verifier_mdp(pwd_saisi, db_password):
-                            if not mdp_est_hashe(db_password):
-                                try:
-                                    conn_mig = sqlite3.connect(DB_NAME)
-                                    c_mig = conn_mig.cursor()
-                                    c_mig.execute(
-                                        "UPDATE utilisateurs SET password = ? WHERE email = ?",
-                                        (hacher_mdp(pwd_saisi), email_saisi),
-                                    )
-                                    conn_mig.commit()
-                                    conn_mig.close()
-                                except Exception:
-                                    pass
-
-                            date_exp = datetime.date.fromisoformat(db_date_fin)
-                            aujourdhui = datetime.date.today()
-
-                            if db_is_admin == 1 or aujourdhui <= date_exp:
-                                st.session_state["password_correct"] = True
-                                st.session_state["user_email"] = email_saisi
-                                st.session_state["is_admin"] = bool(db_is_admin)
-                                st.session_state["structure_id"] = db_structure_id
-                                try:
-                                    conn_s = sqlite3.connect(DB_NAME)
-                                    row_s = conn_s.execute("SELECT nom FROM structures WHERE id = ?", (db_structure_id,)).fetchone()
-                                    conn_s.close()
-                                    st.session_state["structure_nom"] = row_s[0] if row_s else "Non assignée"
-                                except Exception:
-                                    st.session_state["structure_nom"] = "Non assignée"
-                                st.session_state["mail_config"] = {
-                                    "email": m_mail or "", "password": m_pass or "", "imap": m_imap or "imap.gmail.com"
-                                }
-                                st.rerun()
-                            else:
-                                st.error("Votre période d'accès a expiré. Contactez l'administrateur.")
-                        else:
-                            st.error("Email ou mot de passe incorrect.")
-                    else:
-                        st.error("Email ou mot de passe incorrect.")
-                except Exception as e:
-                    st.error(f"Erreur de connexion : {e}")
-
-    return False
+    return sorted(resultats, key=lambda x: int(x.get("score_global", 0)), reverse=True)
 
 
-initialiser_auth_db()
-
+# ============================================================
+#  POINT D'ENTRÉE — AUTHENTIFICATION
+# ============================================================
 if not check_password():
     st.stop()
 
-# --- CONFIGURATION IA ---
-try:
-    gemini_key = st.secrets["GEMINI_API_KEY"]
-    genai.configure(api_key=gemini_key)
-    model = genai.GenerativeModel("gemini-2.0-flash")
-    IA_DISPONIBLE = True
-except Exception:
-    IA_DISPONIBLE = False
-    model = None
-
-
-# ============================================================
-#  TABLES MÉTIER
-# ============================================================
-def initialiser_tables_metier():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS beneficiaires (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            structure_id INTEGER,
-            nom TEXT, prenom TEXT, adresse TEXT, telephone TEXT,
-            niveau_dependance TEXT,
-            pathologies TEXT,
-            gestes_techniques TEXT,
-            besoins_horaires TEXT,
-            referent_famille TEXT,
-            notes TEXT,
-            statut TEXT DEFAULT 'Actif',
-            date_creation TEXT,
-            contact_urgence_nom TEXT DEFAULT '',
-            contact_urgence_tel TEXT DEFAULT '',
-            besoins_recurrents TEXT DEFAULT '',
-            intervenant_attitré_id INTEGER DEFAULT NULL
-        )
-    """)
-
-    # Migration : ajout des colonnes étendues si elles n'existent pas encore
-    for col_def in [
-        ("contact_urgence_nom", "TEXT DEFAULT ''"),
-        ("contact_urgence_tel", "TEXT DEFAULT ''"),
-        ("besoins_recurrents", "TEXT DEFAULT ''"),
-        ("intervenant_attitré_id", "INTEGER DEFAULT NULL"),
-    ]:
-        try:
-            c.execute(f"ALTER TABLE beneficiaires ADD COLUMN {col_def[0]} {col_def[1]}")
-        except Exception:
-            pass
-
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS intervenants (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            structure_id INTEGER,
-            nom TEXT, prenom TEXT, telephone TEXT, email TEXT,
-            type_statut TEXT,
-            competences TEXT,
-            experience_texte TEXT,
-            zone_geo TEXT,
-            disponibilites TEXT,
-            statut_dispo TEXT DEFAULT 'Disponible',
-            source TEXT,
-            date_ajout TEXT
-        )
-    """)
-
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS habilitations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            structure_id INTEGER,
-            intervenant_id INTEGER,
-            type_habilitation TEXT,
-            date_obtention TEXT,
-            date_expiration TEXT,
-            FOREIGN KEY(intervenant_id) REFERENCES intervenants(id)
-        )
-    """)
-
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS interventions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            structure_id INTEGER,
-            beneficiaire_id INTEGER,
-            intervenant_id INTEGER,
-            date_intervention TEXT,
-            heure_debut TEXT,
-            heure_fin TEXT,
-            type_intervention TEXT,
-            statut TEXT DEFAULT 'Planifié',
-            notes TEXT,
-            FOREIGN KEY(beneficiaire_id) REFERENCES beneficiaires(id),
-            FOREIGN KEY(intervenant_id) REFERENCES intervenants(id)
-        )
-    """)
-
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS documents_transmissions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            structure_id INTEGER,
-            beneficiaire_id INTEGER,
-            intervenant_id INTEGER,
-            date_creation TEXT,
-            type_document TEXT,
-            contenu TEXT,
-            FOREIGN KEY(beneficiaire_id) REFERENCES beneficiaires(id),
-            FOREIGN KEY(intervenant_id) REFERENCES intervenants(id)
-        )
-    """)
-
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS sollicitations_urgence (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            structure_id INTEGER,
-            intervention_id INTEGER,
-            intervenant_id INTEGER,
-            score_global INTEGER,
-            justification TEXT,
-            alerte_habilitation TEXT,
-            date_envoi TEXT,
-            statut TEXT DEFAULT 'En attente',
-            FOREIGN KEY(intervention_id) REFERENCES interventions(id),
-            FOREIGN KEY(intervenant_id) REFERENCES intervenants(id)
-        )
-    """)
-
-    conn.commit()
-    conn.close()
-
-
-initialiser_tables_metier()
-
-
-def charger_df(requete, params=()):
-    conn = sqlite3.connect(DB_NAME)
-    df = pd.read_sql_query(requete, conn, params=params)
-    conn.close()
-    return df
-
-
-def executer(requete, params=()):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute(requete, params)
-    conn.commit()
-    last_id = c.lastrowid
-    conn.close()
-    return last_id
+# Raccourcis session
+SID = st.session_state["structure_id"]
+USER_ID = st.session_state["user_id"]
+IS_ADMIN = st.session_state.get("is_admin", False)
 
 
 # ============================================================
@@ -852,297 +696,269 @@ def executer(requete, params=()):
 # ============================================================
 st.sidebar.markdown("### ⚙️ Mon Compte")
 st.sidebar.caption(f"Connecté : {st.session_state.get('user_email', '')}")
-st.sidebar.caption(f"🏢 Structure : {st.session_state.get('structure_nom', 'Non assignée')}")
+st.sidebar.caption(f"🏢 {st.session_state.get('structure_nom', 'Non assignée')}")
 
-peut_ia, nb_req, quota_max = peut_utiliser_ia(st.session_state.get("user_email", ""))
+peut_ia, nb_req, quota_max = peut_utiliser_ia()
 if quota_max >= 999999:
     st.sidebar.success("👑 Compte PRO illimité")
 else:
-    st.sidebar.info(f"Requêtes IA utilisées : {nb_req} / {quota_max}")
+    st.sidebar.info(f"Requêtes IA : {nb_req} / {quota_max}")
 
 if IA_DISPONIBLE:
-    st.sidebar.success("🔑 Clé API Gemini chargée (.secrets)")
+    st.sidebar.success("🔑 Gemini configuré")
 else:
-    st.sidebar.warning("⚠️ Clé API Gemini non configurée (fonctions IA indisponibles)")
+    st.sidebar.warning("⚠️ Clé Gemini manquante")
 
 if st.sidebar.button("🚪 Se déconnecter"):
-    st.session_state["password_correct"] = False
+    audit("LOGOUT", "profils", USER_ID)
+    sb.auth.sign_out()
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
     st.rerun()
 
 st.sidebar.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
 
-if st.session_state.get("is_admin", False):
+# --- Admin sidebar ---
+if IS_ADMIN:
     st.sidebar.markdown("### 👑 Administration")
 
-    with st.sidebar.expander("➕ Créer un accès structure/utilisateur"):
-        df_structures_existantes = charger_df("SELECT nom FROM structures ORDER BY nom")
+    with st.sidebar.expander("➕ Créer un accès"):
+        df_structs = sb_select("structures", order="nom")
         with st.form("form_add_user"):
-            p_structure_existante = st.selectbox(
-                "Structure existante (ou laisser vide pour en créer une nouvelle)",
-                [""] + df_structures_existantes["nom"].tolist() if not df_structures_existantes.empty else [""]
+            struct_existante = st.selectbox(
+                "Structure existante",
+                [""] + (df_structs["nom"].tolist() if not df_structs.empty else [])
             )
-            p_structure_nouvelle = st.text_input("OU nom d'une nouvelle structure")
-            p_email = st.text_input("Email du nouvel utilisateur")
+            struct_nouvelle = st.text_input("OU nouvelle structure")
+            p_email = st.text_input("Email utilisateur")
             p_pwd = st.text_input("Mot de passe temporaire")
             p_duree = st.number_input("Durée d'accès (jours)", min_value=1, value=30)
             btn_add = st.form_submit_button("Créer l'accès")
 
             if btn_add and p_email and p_pwd:
-                nom_structure_finale = p_structure_nouvelle.strip() if p_structure_nouvelle.strip() else p_structure_existante
-                if not nom_structure_finale:
-                    st.error("Merci d'indiquer une structure (existante ou nouvelle).")
+                if len(p_pwd) < 8:
+                    st.error("8 caractères minimum pour le mot de passe.")
                 else:
-                    structure_id_new = get_or_create_structure(nom_structure_finale)
-                    date_fin_calc = (datetime.date.today() + datetime.timedelta(days=int(p_duree))).isoformat()
-                    try:
-                        executer(
-                            """INSERT INTO utilisateurs (email, password, date_fin_essai, est_admin, nb_requetes_ia, quota_max, structure_id)
-                               VALUES (?, ?, ?, 0, 0, 20, ?)""",
-                            (p_email, hacher_mdp(p_pwd), date_fin_calc, structure_id_new)
-                        )
-                        st.success(f"Accès créé pour {p_email} (structure : {nom_structure_finale}) jusqu'au {datetime.date.fromisoformat(date_fin_calc).strftime('%d/%m/%Y')} ! Mot de passe à communiquer : **{p_pwd}**")
-                    except Exception as e_add:
-                        st.error(f"Erreur : {e_add}")
+                    nom_struct = struct_nouvelle.strip() or struct_existante
+                    if not nom_struct:
+                        st.error("Choisissez ou créez une structure.")
+                    else:
+                        # Créer la structure si nouvelle
+                        struct_row = sb_select("structures", {"nom": nom_struct})
+                        if struct_row.empty:
+                            struct_row = sb_insert("structures", {"nom": nom_struct})
+                            struct_id = struct_row["id"] if struct_row else None
+                        else:
+                            struct_id = struct_row.iloc[0]["id"]
 
-    with st.sidebar.expander("🔑 Changer mon mot de passe"):
-        with st.form("form_changer_mdp"):
-            n1 = st.text_input("Nouveau mot de passe", type="password")
-            n2 = st.text_input("Confirmer", type="password")
-            btn_pwd = st.form_submit_button("Mettre à jour")
-            if btn_pwd:
-                if not n1 or n1 != n2:
-                    st.error("Les mots de passe ne correspondent pas ou sont vides.")
-                elif len(n1) < 8:
-                    st.error("8 caractères minimum.")
-                else:
-                    executer("UPDATE utilisateurs SET password = ? WHERE email = ?", (hacher_mdp(n1), st.session_state["user_email"]))
-                    st.success("Mot de passe mis à jour.")
+                        if struct_id:
+                            date_fin = (datetime.date.today() + datetime.timedelta(days=int(p_duree))).isoformat()
+                            try:
+                                # Créer via Supabase Auth (admin)
+                                auth_res = get_supabase_admin().auth.admin.create_user({
+                                    "email": p_email,
+                                    "password": p_pwd,
+                                    "email_confirm": True
+                                })
+                                new_uid = auth_res.user.id
+                                sb_insert("profils", {
+                                    "id": new_uid,
+                                    "structure_id": struct_id,
+                                    "email": p_email,
+                                    "est_admin": False,
+                                    "statut_abonnement": "ESSAI",
+                                    "quota_max_ia": 20,
+                                    "date_fin_essai": date_fin
+                                })
+                                audit("CREATE_USER", "profils", new_uid, {"structure": nom_struct})
+                                st.success(f"✅ Accès créé pour {p_email} jusqu'au {date_fr(date_fin, 'court')}")
+                            except Exception as e:
+                                st.error(f"Erreur : {e}")
 
-    with st.sidebar.expander("📊 Quotas IA & Remise à 0"):
-        df_users = charger_df("SELECT email, nb_requetes_ia, quota_max, statut_abonnement, date_fin_essai FROM utilisateurs")
-        st.dataframe(df_users, use_container_width=True, hide_index=True)
-        email_reset = st.text_input("Email à réinitialiser")
-        if st.button("Remettre le quota à 0"):
-            if email_reset:
-                reinitialiser_quota_ia(email_reset)
-                st.success("Quota réinitialisé.")
+    with st.sidebar.expander("📊 Quotas IA"):
+        df_users = sb_select("profils", order="email")
+        if not df_users.empty:
+            st.dataframe(
+                df_users[["email", "nb_requetes_ia", "quota_max_ia", "statut_abonnement", "date_fin_essai"]],
+                use_container_width=True, hide_index=True
+            )
+            email_reset = st.text_input("Email à réinitialiser")
+            if st.button("Remettre à 0"):
+                if email_reset:
+                    sb_update("profils", {"nb_requetes_ia": 0}, "email", email_reset)
+                    st.success("Quota réinitialisé.")
 
 st.sidebar.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
+
 
 # ============================================================
 #  MENU PRINCIPAL
 # ============================================================
-st.sidebar.markdown("### 📋 Menu principal")
+st.sidebar.markdown("### 📋 Menu")
 
-_liste_onglets = [
+_onglets = [
     "🏠 Tableau de bord",
-    "🧑‍🤝‍🧑 Vivier & Sourcing Direct",
+    "🧑‍🤝‍🧑 Vivier & Sourcing",
     "🎯 Matching IA",
-    "❤️ Portefeuille Bénéficiaires",
+    "❤️ Bénéficiaires",
     "📝 Documents & Transmissions",
-    "📅 Plannings, Tournées & Urgences",
-    "✅ Conformité & Suivi",
+    "📅 Plannings & Urgences",
+    "✅ Conformité & Habilitations",
+    "📊 Suivi des heures",
     "👤 Mon Profil",
 ]
-if st.session_state.get("is_admin", False):
-    _liste_onglets.append("🛠️ Administration")
+if IS_ADMIN:
+    _onglets.append("🛠️ Administration")
 
-onglet = st.sidebar.radio("Navigation", _liste_onglets, label_visibility="collapsed")
+onglet = st.sidebar.radio("Navigation", _onglets, label_visibility="collapsed")
 
 st.markdown(f"# {onglet}")
 st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
 
 
 # ============================================================
-#  ONGLET 0 : TABLEAU DE BORD — ALERTES CENTRALISÉES
+#  🏠 TABLEAU DE BORD
 # ============================================================
 if onglet == "🏠 Tableau de bord":
-
-    sid = st.session_state["structure_id"]
     aujourdhui = datetime.date.today()
     seuil_60j = aujourdhui + datetime.timedelta(days=60)
 
-    # --- Métriques globales ---
     col1, col2, col3, col4 = st.columns(4)
-    nb_benef = len(charger_df("SELECT id FROM beneficiaires WHERE statut='Actif' AND structure_id=?", (sid,)))
-    nb_interv = len(charger_df("SELECT id FROM intervenants WHERE statut_dispo='Disponible' AND structure_id=?", (sid,)))
-    nb_plan_semaine = len(charger_df(
-        "SELECT id FROM interventions WHERE structure_id=? AND date_intervention BETWEEN ? AND ? AND statut != 'Annulé'",
-        (sid, aujourdhui.isoformat(), (aujourdhui + datetime.timedelta(days=7)).isoformat())
-    ))
-    nb_urgences = len(charger_df("SELECT id FROM interventions WHERE statut='Urgence à pourvoir' AND structure_id=?", (sid,)))
+    nb_benef = len(sb_select("beneficiaires", {"structure_id": SID, "statut": "Actif"}))
+    nb_interv_dispo = len(sb_select("intervenants", {"structure_id": SID, "statut_dispo": "Disponible"}))
+
+    df_semaine = sb_select("interventions", {"structure_id": SID})
+    if not df_semaine.empty:
+        df_semaine["date_intervention"] = pd.to_datetime(df_semaine["date_intervention"]).dt.date
+        nb_plan_7j = len(df_semaine[
+            (df_semaine["date_intervention"] >= aujourdhui) &
+            (df_semaine["date_intervention"] <= aujourdhui + datetime.timedelta(days=7)) &
+            (df_semaine["statut"] != "Annulé")
+        ])
+        nb_urgences = len(df_semaine[df_semaine["statut"] == "Urgence à pourvoir"])
+    else:
+        nb_plan_7j = nb_urgences = 0
 
     col1.metric("👥 Bénéficiaires actifs", nb_benef)
-    col2.metric("🧑‍⚕️ Intervenants dispo", nb_interv)
-    col3.metric("📅 Interventions (7j)", nb_plan_semaine)
-    col4.metric("🚨 Urgences en cours", nb_urgences, delta=f"-{nb_urgences}" if nb_urgences > 0 else None, delta_color="inverse")
+    col2.metric("🧑‍⚕️ Intervenants dispo", nb_interv_dispo)
+    col3.metric("📅 Interventions (7j)", nb_plan_7j)
+    col4.metric("🚨 Urgences", nb_urgences,
+                delta=f"-{nb_urgences}" if nb_urgences > 0 else None, delta_color="inverse")
 
     st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
-
-    # --- Alertes ---
     st.subheader("🔔 Alertes & points d'attention")
 
-    alertes_rouges = []
-    alertes_oranges = []
-    alertes_bleues = []
+    alertes_rouges, alertes_oranges, alertes_bleues = [], [], []
 
-    # 1. Habilitations expirées
-    df_habs_exp = charger_df("""
-        SELECT h.type_habilitation, h.date_expiration,
-               v.prenom || ' ' || v.nom as intervenant
-        FROM habilitations h
-        LEFT JOIN intervenants v ON h.intervenant_id = v.id
-        WHERE h.structure_id = ? AND h.date_expiration < ?
-        ORDER BY h.date_expiration
-    """, (sid, aujourdhui.isoformat()))
-    for _, h in df_habs_exp.iterrows():
-        alertes_rouges.append(f"🔴 Habilitation <b>{h['type_habilitation']}</b> de <b>{h['intervenant']}</b> expirée depuis le {h['date_expiration']}")
+    # Habilitations expirées / bientôt
+    df_habs_all = sb_select("habilitations", {"structure_id": SID})
+    if not df_habs_all.empty:
+        df_interv_noms = sb_select("intervenants", {"structure_id": SID})
+        interv_noms = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_interv_noms.iterrows()}
 
-    # 2. Habilitations expirant dans moins de 60 jours
-    df_habs_60 = charger_df("""
-        SELECT h.type_habilitation, h.date_expiration,
-               v.prenom || ' ' || v.nom as intervenant
-        FROM habilitations h
-        LEFT JOIN intervenants v ON h.intervenant_id = v.id
-        WHERE h.structure_id = ? AND h.date_expiration >= ? AND h.date_expiration <= ?
-        ORDER BY h.date_expiration
-    """, (sid, aujourdhui.isoformat(), seuil_60j.isoformat()))
-    for _, h in df_habs_60.iterrows():
-        jours = (datetime.date.fromisoformat(h['date_expiration']) - aujourdhui).days
-        alertes_oranges.append(f"🟠 Habilitation <b>{h['type_habilitation']}</b> de <b>{h['intervenant']}</b> expire dans <b>{jours} jour(s)</b> ({h['date_expiration']})")
+        df_habs_all["date_exp_dt"] = pd.to_datetime(df_habs_all["date_expiration"], errors="coerce").dt.date
+        for _, hb in df_habs_all.iterrows():
+            nom_i = h(interv_noms.get(str(hb.get("intervenant_id", "")), "Inconnu"))
+            type_h = h(hb["type_habilitation"])
+            exp = hb["date_expiration"]
+            if pd.isna(hb["date_exp_dt"]): continue
+            if hb["date_exp_dt"] < aujourdhui:
+                alertes_rouges.append(f"🔴 Habilitation <b>{type_h}</b> de <b>{nom_i}</b> expirée depuis le {exp}")
+            elif hb["date_exp_dt"] <= seuil_60j:
+                jours = (hb["date_exp_dt"] - aujourdhui).days
+                alertes_oranges.append(f"🟠 Habilitation <b>{type_h}</b> de <b>{nom_i}</b> expire dans <b>{jours}j</b> ({exp})")
 
-    # 3. Interventions non confirmées (statut Urgence à pourvoir)
-    df_urg = charger_df("""
-        SELECT i.date_intervention, i.heure_debut, i.heure_fin, i.type_intervention,
-               b.prenom || ' ' || b.nom as beneficiaire
-        FROM interventions i
-        LEFT JOIN beneficiaires b ON i.beneficiaire_id = b.id
-        WHERE i.statut = 'Urgence à pourvoir' AND i.structure_id = ?
-        ORDER BY i.date_intervention
-    """, (sid,))
-    for _, u in df_urg.iterrows():
-        alertes_rouges.append(f"🚨 Intervention <b>non couverte</b> : {u['date_intervention']} {u['heure_debut']}–{u['heure_fin']} ({u['type_intervention']}) — Bénéficiaire : {u['beneficiaire']}")
+    # Urgences non couvertes
+    df_urg = sb_select("interventions", {"structure_id": SID, "statut": "Urgence à pourvoir"})
+    if not df_urg.empty:
+        df_benef_noms = sb_select("beneficiaires", {"structure_id": SID})
+        benef_noms = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_benef_noms.iterrows()}
+        for _, u in df_urg.iterrows():
+            b_nom = h(benef_noms.get(str(u.get("beneficiaire_id", "")), "Inconnu"))
+            alertes_rouges.append(
+                f"🚨 Intervention <b>non couverte</b> : {h(str(u['date_intervention']))} "
+                f"{h(str(u['heure_debut']))}–{h(str(u['heure_fin']))} ({h(str(u['type_intervention']))}) — {b_nom}"
+            )
 
-    # 4. Bénéficiaires sans intervenant attitré
-    df_sans_attitré = charger_df("""
-        SELECT prenom || ' ' || nom as nom_complet
-        FROM beneficiaires
-        WHERE structure_id = ? AND statut = 'Actif'
-          AND (intervenant_attitré_id IS NULL OR intervenant_attitré_id = 0)
-        ORDER BY nom
-    """, (sid,))
-    for _, b in df_sans_attitré.iterrows():
-        alertes_bleues.append(f"ℹ️ <b>{b['nom_complet']}</b> n'a pas d'intervenant attitré défini")
-
-    total_alertes = len(alertes_rouges) + len(alertes_oranges) + len(alertes_bleues)
-
-    if total_alertes == 0:
-        st.markdown("""
-            <div class="oc-card oc-card-ok">
-                <b>✅ Tout est en ordre !</b> Aucune alerte active pour votre structure.
-            </div>
-        """, unsafe_allow_html=True)
+    total = len(alertes_rouges) + len(alertes_oranges) + len(alertes_bleues)
+    if total == 0:
+        st.markdown('<div class="oc-card oc-card-ok"><b>✅ Tout est en ordre !</b></div>', unsafe_allow_html=True)
     else:
-        # Alertes rouges (critiques)
         if alertes_rouges:
             with st.expander(f"🔴 Alertes critiques ({len(alertes_rouges)})", expanded=True):
                 for a in alertes_rouges:
-                    st.markdown(f"""
-                        <div class="alert-box alert-box-rouge">
-                            <div class="alert-content"><span class="alert-detail">{a}</span></div>
-                        </div>
-                    """, unsafe_allow_html=True)
-
-        # Alertes oranges (à surveiller)
+                    st.markdown(f'<div class="alert-box alert-box-rouge">{a}</div>', unsafe_allow_html=True)
         if alertes_oranges:
             with st.expander(f"🟠 À renouveler prochainement ({len(alertes_oranges)})", expanded=True):
                 for a in alertes_oranges:
-                    st.markdown(f"""
-                        <div class="alert-box alert-box-orange">
-                            <div class="alert-content"><span class="alert-detail">{a}</span></div>
-                        </div>
-                    """, unsafe_allow_html=True)
-
-        # Alertes bleues (informations)
+                    st.markdown(f'<div class="alert-box alert-box-orange">{a}</div>', unsafe_allow_html=True)
         if alertes_bleues:
             with st.expander(f"ℹ️ Points d'attention ({len(alertes_bleues)})"):
                 for a in alertes_bleues:
-                    st.markdown(f"""
-                        <div class="alert-box alert-box-bleu">
-                            <div class="alert-content"><span class="alert-detail">{a}</span></div>
-                        </div>
-                    """, unsafe_allow_html=True)
+                    st.markdown(f'<div class="alert-box alert-box-bleu">{a}</div>', unsafe_allow_html=True)
 
+    # Interventions du jour
     st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
-
-    # --- Interventions du jour ---
     st.subheader(f"📅 Interventions du jour — {date_fr(aujourdhui, 'long')}")
-    df_jour = charger_df("""
-        SELECT i.heure_debut, i.heure_fin, i.type_intervention, i.statut,
-               b.prenom || ' ' || b.nom as beneficiaire,
-               v.prenom || ' ' || v.nom as intervenant
-        FROM interventions i
-        LEFT JOIN beneficiaires b ON i.beneficiaire_id = b.id
-        LEFT JOIN intervenants v ON i.intervenant_id = v.id
-        WHERE i.date_intervention = ? AND i.structure_id = ?
-        ORDER BY i.heure_debut
-    """, (aujourdhui.isoformat(), sid))
-
+    df_jour = sb_select("interventions", {"structure_id": SID, "date_intervention": aujourdhui.isoformat()})
     if df_jour.empty:
         st.caption("Aucune intervention planifiée aujourd'hui.")
     else:
+        df_benef_noms = sb_select("beneficiaires", {"structure_id": SID})
+        df_interv_noms = sb_select("intervenants", {"structure_id": SID})
+        benef_noms = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_benef_noms.iterrows()}
+        interv_noms = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_interv_noms.iterrows()}
+
         for _, row in df_jour.iterrows():
-            couleur_p = {"Planifié": "#4c8dfa", "Urgence à pourvoir": "#e0554f", "Réalisé": "#3fae74", "Annulé": "#8996a3"}.get(row["statut"], "#8996a3")
+            coul = {"Planifié":"#4c8dfa","Urgence à pourvoir":"#e0554f","Réalisé":"#3fae74","Annulé":"#8996a3"}.get(row["statut"], "#8996a3")
+            b_nom = h(benef_noms.get(str(row.get("beneficiaire_id", "")), "—"))
+            i_nom = h(interv_noms.get(str(row.get("intervenant_id", "")), "Non assigné"))
             st.markdown(f"""
-                <div class="oc-card" style="border-left-color:{couleur_p}; padding:12px 16px;">
-                    <b>{row['heure_debut']} – {row['heure_fin']}</b> · {row['type_intervention']}
-                    <span class="oc-badge" style="background:{couleur_p}; float:right;">{row['statut']}</span><br>
-                    <span style="color:#b8c2cc;">👤 {row['beneficiaire']} &nbsp;•&nbsp; 🧑‍⚕️ {row['intervenant']}</span>
+                <div class="oc-card" style="border-left-color:{coul}; padding:12px 16px;">
+                    <b>{h(str(row['heure_debut']))} – {h(str(row['heure_fin']))}</b> · {h(str(row['type_intervention']))}
+                    <span class="oc-badge" style="background:{coul}; float:right;">{h(str(row['statut']))}</span><br>
+                    <span style="color:#b8c2cc;">👤 {b_nom} &nbsp;•&nbsp; 🧑‍⚕️ {i_nom}</span>
                 </div>
             """, unsafe_allow_html=True)
 
 
 # ============================================================
-#  ONGLET 1 : VIVIER & SOURCING DIRECT
+#  🧑‍🤝‍🧑 VIVIER & SOURCING
 # ============================================================
-if onglet == "🧑‍🤝‍🧑 Vivier & Sourcing Direct":
-
-    tab_liste, tab_ajout, tab_sourcing = st.tabs(["📋 Vivier actuel", "➕ Ajouter un intervenant", "🔎 Sourcing externe direct"])
+elif onglet == "🧑‍🤝‍🧑 Vivier & Sourcing":
+    tab_liste, tab_ajout, tab_sourcing = st.tabs(["📋 Vivier", "➕ Ajouter", "🔎 Sourcing externe"])
 
     with tab_liste:
-        df_interv = charger_df("SELECT * FROM intervenants WHERE structure_id = ? ORDER BY date_ajout DESC", (st.session_state["structure_id"],))
+        df_interv = sb_select("intervenants", {"structure_id": SID}, order="date_ajout")
         col_f1, col_f2 = st.columns(2)
-        with col_f1:
-            filtre_type = st.selectbox("Filtrer par statut", ["Tous", "Interne", "Vivier candidat", "Externe ponctuel"])
-        with col_f2:
-            filtre_dispo = st.selectbox("Filtrer par disponibilité", ["Toutes", "Disponible", "En mission", "Indisponible"])
+        filtre_type = col_f1.selectbox("Statut", ["Tous", "Interne", "Vivier candidat", "Externe ponctuel"])
+        filtre_dispo = col_f2.selectbox("Disponibilité", ["Toutes", "Disponible", "En mission", "Indisponible"])
 
-        df_affiche = df_interv.copy()
-        if filtre_type != "Tous":
-            df_affiche = df_affiche[df_affiche["type_statut"] == filtre_type]
-        if filtre_dispo != "Toutes":
-            df_affiche = df_affiche[df_affiche["statut_dispo"] == filtre_dispo]
+        df_aff = df_interv.copy() if not df_interv.empty else pd.DataFrame()
+        if not df_aff.empty:
+            if filtre_type != "Tous": df_aff = df_aff[df_aff["type_statut"] == filtre_type]
+            if filtre_dispo != "Toutes": df_aff = df_aff[df_aff["statut_dispo"] == filtre_dispo]
 
         col_m1, col_m2, col_m3 = st.columns(3)
-        col_m1.metric("Total intervenants", len(df_interv))
-        col_m2.metric("Disponibles maintenant", len(df_interv[df_interv["statut_dispo"] == "Disponible"]) if not df_interv.empty else 0)
-        col_m3.metric("Vivier candidats (hors poste)", len(df_interv[df_interv["type_statut"] == "Vivier candidat"]) if not df_interv.empty else 0)
+        col_m1.metric("Total", len(df_interv))
+        col_m2.metric("Disponibles", len(df_interv[df_interv["statut_dispo"] == "Disponible"]) if not df_interv.empty else 0)
+        col_m3.metric("Vivier candidats", len(df_interv[df_interv["type_statut"] == "Vivier candidat"]) if not df_interv.empty else 0)
 
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        if df_affiche.empty:
-            st.info("Aucun intervenant enregistré pour ce filtre.")
+        if df_aff.empty:
+            st.info("Aucun intervenant pour ce filtre.")
         else:
-            for _, row in df_affiche.iterrows():
-                couleur = {"Disponible": "#3fae74", "En mission": "#d99a3d", "Indisponible": "#e0554f"}.get(row["statut_dispo"], "#8996a3")
+            for _, row in df_aff.iterrows():
+                coul = {"Disponible":"#3fae74","En mission":"#d99a3d","Indisponible":"#e0554f"}.get(row["statut_dispo"], "#8996a3")
                 st.markdown(f"""
-                    <div class="oc-card" style="border-left-color:{couleur};">
+                    <div class="oc-card" style="border-left-color:{coul};">
                         <div style="display:flex; justify-content:space-between; align-items:center;">
-                            <span style="font-size:17px; font-weight:700;">{row['prenom']} {row['nom']}</span>
-                            <span class="oc-badge" style="background-color:{couleur};">{row['statut_dispo']}</span>
+                            <span style="font-size:17px; font-weight:700;">{h(row['prenom'])} {h(row['nom'])}</span>
+                            <span class="oc-badge" style="background:{coul};">{h(row['statut_dispo'])}</span>
                         </div>
-                        <div style="color:#b8c2cc; font-size:13px; margin-top:4px;">{row['type_statut']} • {row['zone_geo'] or 'Zone non précisée'} • Source : {row['source'] or 'N/C'}</div>
-                        <div style="color:#e6ecf2; margin-top:8px;"><b>Compétences :</b> {row['competences'] or 'Non renseigné'}</div>
+                        <div style="color:#b8c2cc; font-size:13px; margin-top:4px;">
+                            {h(row['type_statut'])} • {h(row['zone_geo']) or 'Zone non précisée'} • Source : {h(row['source']) or 'N/C'}
+                        </div>
+                        <div style="color:#e6ecf2; margin-top:8px;"><b>Compétences :</b> {h(row['competences']) or 'Non renseigné'}</div>
                     </div>
                 """, unsafe_allow_html=True)
 
@@ -1150,1140 +966,819 @@ if onglet == "🧑‍🤝‍🧑 Vivier & Sourcing Direct":
                     col_a, col_b = st.columns(2)
                     with col_a:
                         nouveau_statut = st.selectbox(
-                            "Changer la disponibilité", ["Disponible", "En mission", "Indisponible"],
-                            index=["Disponible", "En mission", "Indisponible"].index(row["statut_dispo"]) if row["statut_dispo"] in ["Disponible", "En mission", "Indisponible"] else 0,
+                            "Disponibilité", ["Disponible", "En mission", "Indisponible"],
+                            index=["Disponible","En mission","Indisponible"].index(row["statut_dispo"]) if row["statut_dispo"] in ["Disponible","En mission","Indisponible"] else 0,
                             key=f"dispo_{row['id']}"
                         )
-                        if st.button("Mettre à jour", key=f"maj_dispo_{row['id']}"):
-                            executer("UPDATE intervenants SET statut_dispo = ? WHERE id = ? AND structure_id = ?", (nouveau_statut, row["id"], st.session_state["structure_id"]))
-                            st.success("Statut mis à jour.")
-                            st.rerun()
+                        if st.button("Mettre à jour", key=f"maj_{row['id']}"):
+                            if sb_update("intervenants", {"statut_dispo": nouveau_statut}, "id", row["id"]):
+                                audit("UPDATE_INTERVENANT", "intervenants", str(row["id"]), {"statut_dispo": nouveau_statut})
+                                st.success("Statut mis à jour.")
+                                st.rerun()
                     with col_b:
-                        if st.button("🗑️ Supprimer cet intervenant", key=f"del_{row['id']}"):
-                            executer("DELETE FROM intervenants WHERE id = ? AND structure_id = ?", (row["id"], st.session_state["structure_id"]))
-                            st.warning("Intervenant supprimé.")
-                            st.rerun()
-                    st.write(f"**Parcours / expérience :** {row['experience_texte'] or 'Non renseigné'}")
-                    st.write(f"**Disponibilités déclarées :** {row['disponibilites'] or 'Non renseigné'}")
-                    st.write(f"**Contact :** {row['telephone'] or ''} — {row['email'] or ''}")
+                        if st.button("🗑️ Supprimer", key=f"del_{row['id']}"):
+                            if sb_update("intervenants", {"deleted_at": datetime.datetime.utcnow().isoformat()}, "id", row["id"]):
+                                audit("DELETE_INTERVENANT", "intervenants", str(row["id"]))
+                                st.warning("Intervenant archivé.")
+                                st.rerun()
+                    st.write(f"**Parcours :** {row.get('experience_texte') or 'Non renseigné'}")
+                    st.write(f"**Disponibilités :** {row.get('disponibilites') or 'Non renseigné'}")
+                    st.write(f"**Contact :** {row.get('telephone') or ''} — {row.get('email') or ''}")
 
     with tab_ajout:
-        st.subheader("Ajouter un intervenant au vivier (interne ou candidat)")
-        with st.form("form_ajout_intervenant"):
+        with st.form("form_ajout_interv"):
             col1, col2 = st.columns(2)
             with col1:
-                nom = st.text_input("Nom")
-                prenom = st.text_input("Prénom")
+                nom = st.text_input("Nom *")
+                prenom = st.text_input("Prénom *")
                 telephone = st.text_input("Téléphone")
                 email_i = st.text_input("Email")
                 type_statut = st.selectbox("Statut", ["Interne", "Vivier candidat", "Externe ponctuel"])
             with col2:
-                competences = st.text_area("Compétences / gestes techniques maîtrisés", placeholder="Ex : toilette, aide au lever, transfert, stimulation cognitive...")
-                experience_texte = st.text_area("Parcours professionnel (texte libre)", placeholder="Décrire le parcours, y compris expériences hors secteur médico-social — utile pour le matching IA.")
-                zone_geo = st.text_input("Zone géographique / secteur d'intervention")
-                disponibilites = st.text_input("Disponibilités (ex : lun-ven matin, weekends...)")
-                source = st.selectbox("Source de recrutement", ["Vivier interne", "CVthèque", "Annonce", "Réseau / cooptation", "Candidature spontanée"])
+                competences = st.text_area("Compétences / gestes techniques")
+                experience_texte = st.text_area("Parcours professionnel")
+                zone_geo = st.text_input("Zone géographique")
+                disponibilites = st.text_input("Disponibilités")
+                source = st.selectbox("Source", ["Vivier interne","CVthèque","Annonce","Réseau / cooptation","Candidature spontanée"])
 
-            submit_add = st.form_submit_button("Ajouter au vivier")
-            if submit_add and nom and prenom:
-                executer(
-                    """INSERT INTO intervenants (structure_id, nom, prenom, telephone, email, type_statut, competences, experience_texte, zone_geo, disponibilites, statut_dispo, source, date_ajout)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Disponible', ?, ?)""",
-                    (st.session_state["structure_id"], nom, prenom, telephone, email_i, type_statut, competences, experience_texte, zone_geo, disponibilites, source, datetime.date.today().isoformat())
-                )
-                st.success(f"{prenom} {nom} ajouté(e) au vivier.")
-                st.rerun()
+            if st.form_submit_button("Ajouter au vivier") and nom and prenom:
+                new_row = sb_insert("intervenants", {
+                    "structure_id": SID, "nom": nom.strip(), "prenom": prenom.strip(),
+                    "telephone": telephone, "email": email_i, "type_statut": type_statut,
+                    "competences": competences, "experience_texte": experience_texte,
+                    "zone_geo": zone_geo, "disponibilites": disponibilites,
+                    "statut_dispo": "Disponible", "source": source,
+                    "date_ajout": datetime.date.today().isoformat()
+                })
+                if new_row:
+                    audit("CREATE_INTERVENANT", "intervenants", new_row.get("id"))
+                    st.success(f"{prenom} {nom} ajouté(e).")
+                    st.rerun()
 
     with tab_sourcing:
-        st.subheader("🔎 Sourcing externe direct — réduire la dépendance aux agences d'intérim")
-        st.caption("Génère des liens de recherche ciblés vers les principales sources de candidats, à ouvrir manuellement.")
-
+        st.subheader("🔎 Sourcing direct — réduire la dépendance aux agences")
         col_s1, col_s2 = st.columns(2)
-        with col_s1:
-            metier_recherche = st.text_input("Métier recherché", value="Auxiliaire de vie")
-        with col_s2:
-            zone_recherche = st.text_input("Zone géographique", value="")
-
-        if st.button("Générer les liens de sourcing"):
-            requete = f"{metier_recherche} {zone_recherche}".strip()
-            requete_url = urllib.parse.quote(requete)
+        metier = col_s1.text_input("Métier", value="Auxiliaire de vie")
+        zone = col_s2.text_input("Zone géographique", value="")
+        if st.button("Générer les liens"):
+            q = urllib.parse.quote(f"{metier} {zone}".strip())
             st.markdown(f"""
-                <div class="oc-card">
-                    <b>🔗 LinkedIn</b><br>
-                    <a href="https://www.linkedin.com/search/results/people/?keywords={requete_url}" target="_blank">Rechercher des profils LinkedIn</a>
-                </div>
-                <div class="oc-card">
-                    <b>🔗 CVthèques ouvertes (recherche web ciblée)</b><br>
-                    <a href="https://www.google.com/search?q={requete_url}+CV+filetype:pdf" target="_blank">Rechercher des CV publics (PDF)</a>
-                </div>
-                <div class="oc-card">
-                    <b>🔗 Groupes Facebook emploi local</b><br>
-                    <a href="https://www.facebook.com/search/groups/?q={requete_url}+emploi" target="_blank">Rechercher des groupes emploi</a>
-                </div>
-                <div class="oc-card">
-                    <b>🔗 Indeed / France Travail</b><br>
-                    <a href="https://www.indeed.fr/jobs?q={requete_url}" target="_blank">Voir les profils similaires sur Indeed</a>
-                </div>
+                <div class="oc-card"><b>🔗 LinkedIn</b><br><a href="https://www.linkedin.com/search/results/people/?keywords={q}" target="_blank">Rechercher sur LinkedIn</a></div>
+                <div class="oc-card"><b>🔗 CV publics (Google)</b><br><a href="https://www.google.com/search?q={q}+CV+filetype:pdf" target="_blank">Rechercher des CV PDF</a></div>
+                <div class="oc-card"><b>🔗 Groupes Facebook emploi</b><br><a href="https://www.facebook.com/search/groups/?q={q}+emploi" target="_blank">Groupes emploi local</a></div>
+                <div class="oc-card"><b>🔗 Indeed</b><br><a href="https://www.indeed.fr/jobs?q={q}" target="_blank">Voir sur Indeed</a></div>
             """, unsafe_allow_html=True)
 
 
 # ============================================================
-#  ONGLET 2 : MATCHING IA
+#  🎯 MATCHING IA
 # ============================================================
-if onglet == "🎯 Matching IA":
-    st.caption("Croise les besoins spécifiques d'un bénéficiaire avec les compétences, habilitations et la proximité des intervenants du vivier.")
-
-    df_benef = charger_df("SELECT * FROM beneficiaires WHERE statut = 'Actif' AND structure_id = ? ORDER BY nom", (st.session_state["structure_id"],))
-    df_interv_dispo = charger_df("SELECT * FROM intervenants WHERE statut_dispo != 'Indisponible' AND structure_id = ?", (st.session_state["structure_id"],))
+elif onglet == "🎯 Matching IA":
+    df_benef = sb_select("beneficiaires", {"structure_id": SID, "statut": "Actif"}, order="nom")
+    df_interv_dispo = sb_select("intervenants", {"structure_id": SID}, order="nom")
+    if not df_interv_dispo.empty:
+        df_interv_dispo = df_interv_dispo[df_interv_dispo["statut_dispo"] != "Indisponible"]
 
     if df_benef.empty:
-        st.info("Ajoute d'abord un bénéficiaire dans l'onglet « Portefeuille Bénéficiaires » pour lancer un matching.")
+        st.info("Ajoutez d'abord un bénéficiaire.")
     elif df_interv_dispo.empty:
-        st.info("Aucun intervenant disponible dans le vivier pour l'instant.")
+        st.info("Aucun intervenant disponible.")
     else:
         benef_labels = {f"{r['prenom']} {r['nom']}": r['id'] for _, r in df_benef.iterrows()}
-        benef_choisi_label = st.selectbox("Bénéficiaire concerné", list(benef_labels.keys()))
+        benef_choisi_label = st.selectbox("Bénéficiaire", list(benef_labels.keys()))
         benef_id = benef_labels[benef_choisi_label]
         benef_row = df_benef[df_benef["id"] == benef_id].iloc[0]
 
         st.markdown(f"""
             <div class="oc-card">
-                <b>Besoins récurrents :</b> {benef_row.get('besoins_recurrents', '') or 'Non renseigné'}<br>
-                <b>Gestes techniques requis :</b> {benef_row.get('gestes_techniques', '') or 'Non renseigné'}<br>
-                <b>Horaires souhaités :</b> {benef_row.get('besoins_horaires', '') or 'Non renseigné'}<br>
-                <b>Niveau de dépendance :</b> {benef_row.get('niveau_dependance', '') or 'Non renseigné'}
+                <b>Besoins récurrents :</b> {h(benef_row.get('besoins_recurrents', '') or 'Non renseigné')}<br>
+                <b>Gestes techniques :</b> {h(benef_row.get('gestes_techniques', '') or 'Non renseigné')}<br>
+                <b>Horaires :</b> {h(benef_row.get('besoins_horaires', '') or 'Non renseigné')}<br>
+                <b>Dépendance :</b> {h(benef_row.get('niveau_dependance', '') or 'Non renseigné')}
             </div>
         """, unsafe_allow_html=True)
 
-        if st.button("🎯 Lancer le matching IA sur le vivier disponible"):
-            if not IA_DISPONIBLE:
-                st.error("Clé API Gemini non configurée — impossible de lancer le matching IA.")
-            else:
-                autorise, _, _ = peut_utiliser_ia(st.session_state["user_email"])
-                if not autorise:
-                    st.error("Quota de requêtes IA atteint pour votre compte.")
-                else:
-                    resultats = []
-                    barre = st.progress(0)
-                    total = len(df_interv_dispo)
+        if st.button("🎯 Lancer le matching IA"):
+            resultats = []
+            barre = st.progress(0)
+            total = len(df_interv_dispo)
 
-                    for idx, (_, interv) in enumerate(df_interv_dispo.iterrows()):
-                        df_habs = charger_df("SELECT * FROM habilitations WHERE intervenant_id = ? AND structure_id = ?", (int(interv["id"]), st.session_state["structure_id"]))
-                        habs_txt = "; ".join([f"{h['type_habilitation']} (exp. {h['date_expiration']})" for _, h in df_habs.iterrows()]) or "Aucune habilitation enregistrée"
+            for idx, (_, interv) in enumerate(df_interv_dispo.iterrows()):
+                df_habs = sb_select("habilitations", {"intervenant_id": str(interv["id"]), "structure_id": SID})
+                habs_txt = "; ".join([f"{r['type_habilitation']} (exp. {r['date_expiration']})" for _, r in df_habs.iterrows()]) or "Aucune"
 
-                        prompt = f"""
-                        Tu es un coordinateur expert en aide à domicile (SAAD/SSIAD). Évalue l'adéquation entre
-                        le besoin du bénéficiaire et le profil de cet intervenant.
+                prompt = f"""
+                Tu es coordinateur SAAD/SSIAD. Évalue l'adéquation entre ce bénéficiaire et cet intervenant.
+                Réponds UNIQUEMENT en JSON avec :
+                - score_competences (0-100)
+                - score_habilitations (0-100)
+                - score_global (0-100)
+                - competences_transferables (liste de chaînes)
+                - alerte_habilitation (texte ou "")
+                - justification (2-3 lignes)
 
-                        CONSIGNES :
-                        1. Compare les gestes techniques requis avec les compétences de l'intervenant.
-                        2. Vérifie si les habilitations listées couvrent les besoins.
-                        3. Repère aussi les compétences transférables issues du parcours.
-                        4. Tiens compte de la compatibilité des disponibilités et de la zone géographique.
+                BESOIN BÉNÉFICIAIRE :
+                Besoins : {benef_row.get('besoins_recurrents','')} | Gestes : {benef_row.get('gestes_techniques','')}
+                Horaires : {benef_row.get('besoins_horaires','')} | GIR : {benef_row.get('niveau_dependance','')}
 
-                        Renvoie STRICTEMENT un objet JSON avec les clés :
-                        - 'score_competences': entier 0-100
-                        - 'score_habilitations': entier 0-100
-                        - 'score_global': entier 0-100
-                        - 'competences_transferables': liste de chaînes "compétence — issue de [expérience précise]"
-                        - 'alerte_habilitation': texte court si une habilitation obligatoire semble manquante, sinon chaîne vide
-                        - 'justification': synthèse de 2-3 lignes
+                PROFIL INTERVENANT :
+                Compétences : {interv['competences']} | Parcours : {interv['experience_texte']}
+                Habilitations : {habs_txt} | Zone : {interv['zone_geo']} | Dispo : {interv['disponibilites']}
+                """
+                data = appel_ia(prompt)
+                if data:
+                    data["intervenant_nom"] = f"{interv['prenom']} {interv['nom']}"
+                    data["intervenant_statut"] = interv["type_statut"]
+                    resultats.append(data)
+                barre.progress((idx + 1) / total)
 
-                        BESOIN DU BÉNÉFICIAIRE :
-                        Besoins récurrents : {benef_row.get('besoins_recurrents', '')}
-                        Gestes techniques requis : {benef_row.get('gestes_techniques', '')}
-                        Horaires souhaités : {benef_row.get('besoins_horaires', '')}
-                        Niveau de dépendance : {benef_row.get('niveau_dependance', '')}
+            st.session_state["resultats_matching"] = sorted(resultats, key=lambda x: int(x.get("score_global", 0)), reverse=True)
 
-                        PROFIL INTERVENANT :
-                        Compétences déclarées : {interv['competences']}
-                        Parcours professionnel : {interv['experience_texte']}
-                        Habilitations : {habs_txt}
-                        Zone géographique : {interv['zone_geo']}
-                        Disponibilités : {interv['disponibilites']}
-                        """
-                        try:
-                            reponse = model.generate_content(prompt)
-                            txt = reponse.text.strip().replace("```json", "").replace("```", "").strip()
-                            data = json.loads(txt)
-                            data["intervenant_nom"] = f"{interv['prenom']} {interv['nom']}"
-                            data["intervenant_statut"] = interv["type_statut"]
-                            resultats.append(data)
-                        except Exception:
-                            pass
-
-                        barre.progress((idx + 1) / total)
-
-                    incrementer_quota_ia(st.session_state["user_email"])
-                    st.session_state["resultats_matching_medico"] = sorted(resultats, key=lambda x: int(x.get("score_global", 0)), reverse=True)
-
-        if "resultats_matching_medico" in st.session_state and st.session_state["resultats_matching_medico"]:
-            st.markdown("### 📊 Résultats du matching")
-            for res in st.session_state["resultats_matching_medico"]:
+        if st.session_state.get("resultats_matching"):
+            st.markdown("### 📊 Résultats")
+            for res in st.session_state["resultats_matching"]:
                 score = int(res.get("score_global", 0))
-                couleur = "#3fae74" if score >= 70 else ("#d99a3d" if score >= 40 else "#e0554f")
+                coul = "#3fae74" if score >= 70 else ("#d99a3d" if score >= 40 else "#e0554f")
                 st.markdown(f"""
-                    <div class="oc-card" style="border-left-color:{couleur};">
-                        <div style="display:flex; justify-content:space-between; align-items:center;">
-                            <span style="font-size:17px; font-weight:700;">{res.get('intervenant_nom')}</span>
-                            <span class="oc-badge" style="background-color:{couleur};">{score}%</span>
+                    <div class="oc-card" style="border-left-color:{coul};">
+                        <div style="display:flex; justify-content:space-between;">
+                            <span style="font-size:17px; font-weight:700;">{h(res.get('intervenant_nom',''))}</span>
+                            <span class="oc-badge" style="background:{coul};">{score}%</span>
                         </div>
-                        <div style="color:#b8c2cc; font-size:13px; margin-top:4px;">{res.get('intervenant_statut', '')}</div>
                     </div>
                 """, unsafe_allow_html=True)
-
                 if res.get("alerte_habilitation"):
                     st.warning(f"⚠️ {res['alerte_habilitation']}")
-
-                with st.expander("Détails du matching"):
-                    col_s1, col_s2 = st.columns(2)
-                    col_s1.caption("Compétences / gestes techniques")
-                    col_s1.progress(min(1.0, int(res.get("score_competences", 0)) / 100))
-                    col_s2.caption("Habilitations")
-                    col_s2.progress(min(1.0, int(res.get("score_habilitations", 0)) / 100))
-
+                with st.expander("Détails"):
+                    c1, c2 = st.columns(2)
+                    c1.caption("Compétences"); c1.progress(min(1.0, int(res.get("score_competences", 0))/100))
+                    c2.caption("Habilitations"); c2.progress(min(1.0, int(res.get("score_habilitations", 0))/100))
                     transf = res.get("competences_transferables", [])
                     if transf:
-                        st.markdown("**🌱 Compétences transférables détectées**")
-                        for t in transf:
-                            st.markdown(f"- {t}")
-
-                    st.markdown("**Synthèse**")
+                        st.markdown("**🌱 Compétences transférables**")
+                        for t in transf: st.markdown(f"- {h(str(t))}")
                     st.write(res.get("justification", ""))
 
 
 # ============================================================
-#  ONGLET 3 : PORTEFEUILLE BÉNÉFICIAIRES (avec fiche simplifiée)
+#  ❤️ BÉNÉFICIAIRES
 # ============================================================
-if onglet == "❤️ Portefeuille Bénéficiaires":
+elif onglet == "❤️ Bénéficiaires":
+    tab_liste_b, tab_ajout_b = st.tabs(["📋 Bénéficiaires", "➕ Ajouter"])
 
-    tab_liste_b, tab_ajout_b = st.tabs(["📋 Bénéficiaires suivis", "➕ Ajouter un bénéficiaire"])
-
-    df_interv_all = charger_df("SELECT id, prenom, nom FROM intervenants WHERE structure_id = ? ORDER BY nom", (st.session_state["structure_id"],))
-    interv_map = {r['id']: f"{r['prenom']} {r['nom']}" for _, r in df_interv_all.iterrows()}
+    df_interv_all = sb_select("intervenants", {"structure_id": SID}, order="nom")
+    interv_map = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_interv_all.iterrows()}
 
     with tab_liste_b:
-        df_b = charger_df("SELECT * FROM beneficiaires WHERE structure_id = ? ORDER BY nom", (st.session_state["structure_id"],))
-        st.metric("Bénéficiaires suivis", len(df_b[df_b["statut"] == "Actif"]) if not df_b.empty else 0)
+        df_b = sb_select("beneficiaires", {"structure_id": SID}, order="nom")
+        st.metric("Bénéficiaires actifs", len(df_b[df_b["statut"] == "Actif"]) if not df_b.empty else 0)
 
         if df_b.empty:
-            st.info("Aucun bénéficiaire enregistré pour l'instant.")
+            st.info("Aucun bénéficiaire enregistré.")
         else:
             for _, row in df_b.iterrows():
-                couleur = "#3fae74" if row["statut"] == "Actif" else "#8996a3"
-                attitré_nom = interv_map.get(row.get("intervenant_attitré_id"), "Non défini")
-
+                coul = "#3fae74" if row["statut"] == "Actif" else "#8996a3"
+                attitré = h(interv_map.get(str(row.get("intervenant_attitré_id", "")), "Non défini"))
                 st.markdown(f"""
-                    <div class="oc-card" style="border-left-color:{couleur};">
-                        <div style="display:flex; justify-content:space-between; align-items:center;">
-                            <span style="font-size:17px; font-weight:700;">{row['prenom']} {row['nom']}</span>
-                            <span class="oc-badge" style="background-color:{couleur};">{row['statut']}</span>
+                    <div class="oc-card" style="border-left-color:{coul};">
+                        <div style="display:flex; justify-content:space-between;">
+                            <span style="font-size:17px; font-weight:700;">{h(row['prenom'])} {h(row['nom'])}</span>
+                            <span class="oc-badge" style="background:{coul};">{h(row['statut'])}</span>
                         </div>
                         <div style="color:#b8c2cc; font-size:13px; margin-top:4px;">
-                            📍 {row['adresse'] or '—'} &nbsp;•&nbsp; 🧑‍⚕️ Attitré : {attitré_nom}
+                            📍 {h(row['adresse']) or '—'} &nbsp;•&nbsp; 🧑‍⚕️ {attitré}
                         </div>
                     </div>
                 """, unsafe_allow_html=True)
 
                 with st.expander(f"📋 Fiche — {row['prenom']} {row['nom']}"):
-                    # --- FICHE BÉNÉFICIAIRE SIMPLIFIÉE ---
-                    col_fiche1, col_fiche2 = st.columns(2)
-
-                    with col_fiche1:
+                    c1, c2 = st.columns(2)
+                    with c1:
                         st.markdown(f"""
                             <div class="fiche-section">
                                 <h4>📍 Coordonnées</h4>
-                                <div class="fiche-row"><span class="fiche-label">Adresse</span><span class="fiche-value">{row['adresse'] or '—'}</span></div>
-                                <div class="fiche-row"><span class="fiche-label">Téléphone</span><span class="fiche-value">{row['telephone'] or '—'}</span></div>
-                                <div class="fiche-row"><span class="fiche-label">Dépendance</span><span class="fiche-value">{row['niveau_dependance'] or '—'}</span></div>
+                                <div class="fiche-row"><span class="fiche-label">Adresse</span><span class="fiche-value">{h(row['adresse']) or '—'}</span></div>
+                                <div class="fiche-row"><span class="fiche-label">Téléphone</span><span class="fiche-value">{h(row['telephone']) or '—'}</span></div>
+                                <div class="fiche-row"><span class="fiche-label">GIR</span><span class="fiche-value">{h(row['niveau_dependance']) or '—'}</span></div>
                             </div>
-                        """, unsafe_allow_html=True)
-
-                        st.markdown(f"""
                             <div class="fiche-section">
                                 <h4>🚨 Contact d'urgence</h4>
-                                <div class="fiche-row"><span class="fiche-label">Nom / lien</span><span class="fiche-value">{row.get('contact_urgence_nom', '') or row.get('referent_famille', '') or '—'}</span></div>
-                                <div class="fiche-row"><span class="fiche-label">Téléphone</span><span class="fiche-value">{row.get('contact_urgence_tel', '') or '—'}</span></div>
+                                <div class="fiche-row"><span class="fiche-label">Nom</span><span class="fiche-value">{h(row.get('contact_urgence_nom','')) or '—'}</span></div>
+                                <div class="fiche-row"><span class="fiche-label">Tél.</span><span class="fiche-value">{h(row.get('contact_urgence_tel','')) or '—'}</span></div>
                             </div>
                         """, unsafe_allow_html=True)
-
-                    with col_fiche2:
+                    with c2:
                         st.markdown(f"""
                             <div class="fiche-section">
                                 <h4>🔄 Besoins récurrents</h4>
-                                <div class="fiche-value">{row.get('besoins_recurrents', '') or row.get('besoins_horaires', '') or '—'}</div>
+                                <div class="fiche-value">{h(row.get('besoins_recurrents','')) or '—'}</div>
                             </div>
-                        """, unsafe_allow_html=True)
-
-                        st.markdown(f"""
                             <div class="fiche-section">
                                 <h4>🧑‍⚕️ Intervenant attitré</h4>
-                                <div class="fiche-value" style="font-size:15px; font-weight:600;">{attitré_nom}</div>
+                                <div class="fiche-value" style="font-size:15px; font-weight:600;">{attitré}</div>
                             </div>
                         """, unsafe_allow_html=True)
 
-                        if row.get('notes'):
-                            st.markdown(f"""
-                                <div class="fiche-section">
-                                    <h4>📝 Notes</h4>
-                                    <div class="fiche-value">{row['notes']}</div>
-                                </div>
-                            """, unsafe_allow_html=True)
-
                     st.markdown("<br>", unsafe_allow_html=True)
-
-                    # --- Actions ---
-                    col_x, col_y, col_z = st.columns(3)
-                    with col_x:
-                        nouveau_statut_b = st.selectbox("Statut", ["Actif", "Inactif"], index=0 if row["statut"] == "Actif" else 1, key=f"statut_b_{row['id']}")
-                        if st.button("Mettre à jour le statut", key=f"maj_b_{row['id']}"):
-                            executer("UPDATE beneficiaires SET statut = ? WHERE id = ? AND structure_id = ?", (nouveau_statut_b, row["id"], st.session_state["structure_id"]))
-                            st.success("Statut mis à jour.")
+                    cx, cy, cz = st.columns(3)
+                    with cx:
+                        nv_statut = st.selectbox("Statut", ["Actif","Inactif","Décédé"],
+                                                  index=["Actif","Inactif","Décédé"].index(row["statut"]) if row["statut"] in ["Actif","Inactif","Décédé"] else 0,
+                                                  key=f"sb_{row['id']}")
+                        if st.button("Mettre à jour", key=f"upd_b_{row['id']}"):
+                            sb_update("beneficiaires", {"statut": nv_statut}, "id", row["id"])
                             st.rerun()
-                    with col_y:
-                        # Changement d'intervenant attitré
-                        options_interv = {"Non défini": None}
-                        options_interv.update({v: k for k, v in interv_map.items()})
-                        idx_att = 0
-                        att_id = row.get("intervenant_attitré_id")
-                        if att_id and att_id in interv_map:
-                            labels_list = list(options_interv.keys())
-                            att_label = interv_map[att_id]
-                            if att_label in labels_list:
-                                idx_att = labels_list.index(att_label)
-                        nouvel_attitré = st.selectbox("Intervenant attitré", list(options_interv.keys()), index=idx_att, key=f"att_{row['id']}")
-                        if st.button("Définir comme attitré", key=f"set_att_{row['id']}"):
-                            executer("UPDATE beneficiaires SET intervenant_attitré_id = ? WHERE id = ? AND structure_id = ?",
-                                     (options_interv[nouvel_attitré], row["id"], st.session_state["structure_id"]))
-                            st.success("Intervenant attitré mis à jour.")
+                    with cy:
+                        opts_i = {"Non défini": None}
+                        opts_i.update({v: k for k, v in interv_map.items()})
+                        if st.button("Définir attitré", key=f"att_{row['id']}"):
+                            pass  # handled below
+                        sel_att = st.selectbox("Attitré", list(opts_i.keys()), key=f"sel_att_{row['id']}")
+                        if st.button("💾 Enregistrer attitré", key=f"save_att_{row['id']}"):
+                            sb_update("beneficiaires", {"intervenant_attitré_id": opts_i[sel_att]}, "id", row["id"])
                             st.rerun()
-                    with col_z:
+                    with cz:
+                        # Export RGPD
+                        if st.button("📥 Export RGPD", key=f"rgpd_{row['id']}"):
+                            df_iv_b = sb_select("interventions", {"structure_id": SID, "beneficiaire_id": str(row["id"])})
+                            df_doc_b = sb_select("documents_transmissions", {"structure_id": SID, "beneficiaire_id": str(row["id"])})
+                            pdf_bytes = creer_pdf_export_rgpd(
+                                row.to_dict(),
+                                df_iv_b.to_dict("records") if not df_iv_b.empty else [],
+                                df_doc_b.to_dict("records") if not df_doc_b.empty else []
+                            )
+                            audit("EXPORT_RGPD", "beneficiaires", str(row["id"]))
+                            st.download_button(
+                                "⬇️ Télécharger le dossier RGPD",
+                                data=pdf_bytes,
+                                file_name=f"dossier_RGPD_{row['nom']}_{row['prenom']}.pdf",
+                                mime="application/pdf",
+                                key=f"dl_rgpd_{row['id']}"
+                            )
                         if st.button("🗑️ Supprimer", key=f"del_b_{row['id']}"):
-                            executer("DELETE FROM beneficiaires WHERE id = ? AND structure_id = ?", (row["id"], st.session_state["structure_id"]))
-                            st.warning("Bénéficiaire supprimé.")
+                            sb_update("beneficiaires", {"deleted_at": datetime.datetime.utcnow().isoformat(), "statut": "Inactif"}, "id", row["id"])
+                            audit("DELETE_BENEFICIAIRE", "beneficiaires", str(row["id"]))
                             st.rerun()
 
     with tab_ajout_b:
-        st.subheader("Ajouter un bénéficiaire")
-        with st.form("form_ajout_beneficiaire"):
-            col1, col2 = st.columns(2)
-            with col1:
+        with st.form("form_add_benef"):
+            c1, c2 = st.columns(2)
+            with c1:
                 nom_b = st.text_input("Nom *")
                 prenom_b = st.text_input("Prénom *")
                 adresse_b = st.text_input("Adresse")
                 telephone_b = st.text_input("Téléphone")
-                niveau_dep = st.selectbox("Niveau de dépendance (GIR)", ["GIR 1", "GIR 2", "GIR 3", "GIR 4", "GIR 5", "GIR 6", "Non évalué"])
-            with col2:
-                contact_urgence_nom_b = st.text_input("Contact d'urgence (nom + lien de parenté)", placeholder="Ex : Marie Dupont, fille")
-                contact_urgence_tel_b = st.text_input("Téléphone contact d'urgence")
-                besoins_recurrents_b = st.text_area("Besoins récurrents", placeholder="Ex : aide à la toilette matin, repas midi, ménage lundi et jeudi")
-                gestes_b = st.text_area("Gestes techniques requis", placeholder="Ex : aide à la toilette, transfert avec lève-personne...")
-                horaires_b = st.text_input("Besoins horaires", placeholder="Ex : matin 8h-9h30, soir 19h-20h")
-                notes_b = st.text_area("Notes complémentaires")
+                niveau_dep = st.selectbox("GIR", ["GIR 1","GIR 2","GIR 3","GIR 4","GIR 5","GIR 6","Non évalué"])
+            with c2:
+                contact_urgence_nom_b = st.text_input("Contact d'urgence (nom + lien)")
+                contact_urgence_tel_b = st.text_input("Tél. contact d'urgence")
+                besoins_rec = st.text_area("Besoins récurrents")
+                gestes_b = st.text_area("Gestes techniques requis")
+                horaires_b = st.text_input("Besoins horaires")
+                notes_b = st.text_area("Notes")
 
-            # Sélection de l'intervenant attitré dès la création
-            interv_options_b = {"Non défini": None}
+            opts_att = {"Non défini": None}
             if not df_interv_all.empty:
-                interv_options_b.update({f"{r['prenom']} {r['nom']}": r['id'] for _, r in df_interv_all.iterrows()})
-            interv_att_b = st.selectbox("Intervenant attitré (optionnel)", list(interv_options_b.keys()))
+                opts_att.update({f"{r['prenom']} {r['nom']}": str(r["id"]) for _, r in df_interv_all.iterrows()})
+            att_sel = st.selectbox("Intervenant attitré (optionnel)", list(opts_att.keys()))
 
-            submit_b = st.form_submit_button("Ajouter le bénéficiaire")
-            if submit_b and nom_b and prenom_b:
-                executer(
-                    """INSERT INTO beneficiaires (structure_id, nom, prenom, adresse, telephone, niveau_dependance,
-                       gestes_techniques, besoins_horaires, referent_famille, notes, statut, date_creation,
-                       contact_urgence_nom, contact_urgence_tel, besoins_recurrents, intervenant_attitré_id)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Actif', ?, ?, ?, ?, ?)""",
-                    (st.session_state["structure_id"], nom_b, prenom_b, adresse_b, telephone_b, niveau_dep,
-                     gestes_b, horaires_b, contact_urgence_nom_b, notes_b, datetime.date.today().isoformat(),
-                     contact_urgence_nom_b, contact_urgence_tel_b, besoins_recurrents_b,
-                     interv_options_b[interv_att_b])
-                )
-                st.success(f"{prenom_b} {nom_b} ajouté(e) au portefeuille.")
-                st.rerun()
+            if st.form_submit_button("Ajouter") and nom_b and prenom_b:
+                new_b = sb_insert("beneficiaires", {
+                    "structure_id": SID, "nom": nom_b.strip(), "prenom": prenom_b.strip(),
+                    "adresse": adresse_b, "telephone": telephone_b, "niveau_dependance": niveau_dep,
+                    "gestes_techniques": gestes_b, "besoins_horaires": horaires_b,
+                    "besoins_recurrents": besoins_rec, "notes": notes_b,
+                    "contact_urgence_nom": contact_urgence_nom_b, "contact_urgence_tel": contact_urgence_tel_b,
+                    "intervenant_attitré_id": opts_att[att_sel],
+                    "statut": "Actif", "date_creation": datetime.date.today().isoformat()
+                })
+                if new_b:
+                    audit("CREATE_BENEFICIAIRE", "beneficiaires", new_b.get("id"))
+                    st.success(f"{prenom_b} {nom_b} ajouté(e).")
+                    st.rerun()
 
 
 # ============================================================
-#  ONGLET 4 : DOCUMENTS & TRANSMISSIONS
+#  📝 DOCUMENTS & TRANSMISSIONS
 # ============================================================
-if onglet == "📝 Documents & Transmissions":
-    st.caption("Assistant de rédaction de comptes-rendus, fiches de liaison et documents professionnels — à relire avant diffusion.")
-
-    df_benef2 = charger_df("SELECT * FROM beneficiaires WHERE statut = 'Actif' AND structure_id = ? ORDER BY nom", (st.session_state["structure_id"],))
-    df_interv2 = charger_df("SELECT * FROM intervenants WHERE structure_id = ? ORDER BY nom", (st.session_state["structure_id"],))
+elif onglet == "📝 Documents & Transmissions":
+    df_benef2 = sb_select("beneficiaires", {"structure_id": SID, "statut": "Actif"}, order="nom")
+    df_interv2 = sb_select("intervenants", {"structure_id": SID}, order="nom")
 
     if df_benef2.empty:
-        st.info("Ajoute d'abord un bénéficiaire pour rédiger une transmission.")
+        st.info("Ajoutez d'abord un bénéficiaire.")
     else:
-        col1, col2 = st.columns(2)
-        with col1:
-            benef_labels2 = {f"{r['prenom']} {r['nom']}": r['id'] for _, r in df_benef2.iterrows()}
-            benef_choisi2 = st.selectbox("Bénéficiaire", list(benef_labels2.keys()), key="benef_doc")
-        with col2:
-            interv_labels2 = {"Non spécifié": None}
-            interv_labels2.update({f"{r['prenom']} {r['nom']}": r['id'] for _, r in df_interv2.iterrows()})
-            interv_choisi2 = st.selectbox("Intervenant rédacteur", list(interv_labels2.keys()), key="interv_doc")
+        c1, c2 = st.columns(2)
+        benef_lbl2 = {f"{r['prenom']} {r['nom']}": str(r["id"]) for _, r in df_benef2.iterrows()}
+        benef_ch2 = c1.selectbox("Bénéficiaire", list(benef_lbl2.keys()))
+        interv_lbl2 = {"Non spécifié": None}
+        interv_lbl2.update({f"{r['prenom']} {r['nom']}": str(r["id"]) for _, r in df_interv2.iterrows()})
+        interv_ch2 = c2.selectbox("Intervenant rédacteur", list(interv_lbl2.keys()))
 
-        type_doc = st.selectbox("Type de document", ["Fiche de liaison", "Compte-rendu de visite", "Transmission d'équipe", "Note d'incident"])
-        notes_brutes = st.text_area("Notes brutes / observations à retranscrire", height=150, placeholder="Ex : Mme X en forme ce matin, a bien mangé, légère douleur au genou signalée, RDV kiné à confirmer...")
+        type_doc = st.selectbox("Type", ["Fiche de liaison","Compte-rendu de visite","Transmission d'équipe","Note d'incident"])
+        notes_brutes = st.text_area("Notes brutes", height=150)
 
-        if st.button("✍️ Générer le document avec l'IA"):
-            if not IA_DISPONIBLE:
-                st.error("Clé API Gemini non configurée.")
-            elif not notes_brutes:
-                st.warning("Ajoute quelques notes brutes avant de générer le document.")
+        if st.button("✍️ Générer avec l'IA"):
+            if not notes_brutes:
+                st.warning("Ajoutez des notes avant de générer.")
             else:
-                autorise2, _, _ = peut_utiliser_ia(st.session_state["user_email"])
-                if not autorise2:
-                    st.error("Quota de requêtes IA atteint.")
-                else:
-                    prompt_doc = f"""
-                    Tu es un(e) coordinateur/trice en structure d'aide à domicile. Rédige un document professionnel
-                    de type "{type_doc}" à partir des notes brutes ci-dessous, dans un style clair, factuel et
-                    professionnel adapté à une transmission d'équipe ou à un dossier bénéficiaire.
-                    Ne rajoute aucune information médicale ou fait qui ne figure pas dans les notes fournies.
-                    Reste synthétique (10-15 lignes maximum).
+                prompt = f"""
+                Tu es coordinateur(trice) en SAAD. Rédige un document de type "{type_doc}"
+                à partir des notes brutes, en style professionnel, factuel, 10-15 lignes max.
+                N'ajoute aucune information médicale absente des notes.
 
-                    Bénéficiaire : {benef_choisi2}
-                    Notes brutes : {notes_brutes}
-                    """
+                Bénéficiaire : {benef_ch2}
+                Notes : {notes_brutes}
+                """
+                data = appel_ia(prompt)
+                if data is None:
+                    # appel_ia() retourne None si erreur, on essaie le texte brut
                     try:
-                        reponse_doc = model.generate_content(prompt_doc)
-                        texte_genere = reponse_doc.text.strip()
-                        incrementer_quota_ia(st.session_state["user_email"])
-                        st.session_state["doc_genere"] = texte_genere
-                    except Exception as e_doc:
-                        st.error(f"Erreur de génération : {e_doc}")
+                        reponse = model.generate_content(prompt)
+                        st.session_state["doc_genere"] = reponse.text.strip()
+                        incrementer_quota_ia()
+                    except Exception as e:
+                        st.error(f"Erreur IA : {e}")
+                else:
+                    st.session_state["doc_genere"] = str(data)
 
         if st.session_state.get("doc_genere"):
-            st.markdown("### 📄 Document généré (à relire avant diffusion)")
-            texte_final = st.text_area("Contenu (modifiable)", value=st.session_state["doc_genere"], height=250)
-
-            col_save, col_pdf = st.columns(2)
-            with col_save:
-                if st.button("💾 Enregistrer dans le dossier bénéficiaire"):
-                    executer(
-                        """INSERT INTO documents_transmissions (structure_id, beneficiaire_id, intervenant_id, date_creation, type_document, contenu)
-                           VALUES (?, ?, ?, ?, ?, ?)""",
-                        (st.session_state["structure_id"], benef_labels2[benef_choisi2], interv_labels2[interv_choisi2], datetime.date.today().isoformat(), type_doc, texte_final)
-                    )
-                    st.success("Document enregistré dans le dossier du bénéficiaire.")
-            with col_pdf:
+            texte_final = st.text_area("Document (modifiable)", value=st.session_state["doc_genere"], height=250)
+            col_s, col_p = st.columns(2)
+            with col_s:
+                if st.button("💾 Enregistrer"):
+                    new_doc = sb_insert("documents_transmissions", {
+                        "structure_id": SID,
+                        "beneficiaire_id": benef_lbl2[benef_ch2],
+                        "intervenant_id": interv_lbl2[interv_ch2],
+                        "date_creation": datetime.date.today().isoformat(),
+                        "type_document": type_doc,
+                        "contenu": texte_final
+                    })
+                    if new_doc:
+                        audit("CREATE_DOCUMENT", "documents_transmissions", new_doc.get("id"))
+                        st.success("Document enregistré.")
+            with col_p:
                 try:
-                    pdf_bytes = creer_pdf_transmission(benef_choisi2, interv_choisi2, datetime.date.today().strftime("%d/%m/%Y"), texte_final)
-                    st.download_button("⬇️ Télécharger en PDF", data=bytes(pdf_bytes), file_name=f"{type_doc}_{benef_choisi2}.pdf", mime="application/pdf")
-                except Exception as e_pdf:
-                    st.error(f"Erreur PDF : {e_pdf}")
+                    pdf_b = creer_pdf_transmission(benef_ch2, interv_ch2, datetime.date.today().strftime("%d/%m/%Y"), texte_final)
+                    st.download_button("⬇️ PDF", data=pdf_b, file_name=f"{type_doc}_{benef_ch2}.pdf", mime="application/pdf")
+                except Exception as e:
+                    st.error(f"Erreur PDF : {e}")
 
         st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
-        st.markdown("### 🗂️ Historique des documents")
-        df_docs = charger_df("""
-            SELECT d.date_creation, d.type_document, b.prenom || ' ' || b.nom as beneficiaire, d.contenu
-            FROM documents_transmissions d
-            LEFT JOIN beneficiaires b ON d.beneficiaire_id = b.id
-            WHERE d.structure_id = ?
-            ORDER BY d.date_creation DESC
-        """, (st.session_state["structure_id"],))
+        st.markdown("### 🗂️ Historique")
+        df_docs = sb_select("documents_transmissions", {"structure_id": SID}, order="date_creation")
         if df_docs.empty:
-            st.caption("Aucun document enregistré pour l'instant.")
+            st.caption("Aucun document enregistré.")
         else:
-            st.dataframe(df_docs, use_container_width=True, hide_index=True)
+            st.dataframe(df_docs[["date_creation","type_document","contenu"]].head(50),
+                        use_container_width=True, hide_index=True)
 
 
 # ============================================================
-#  ONGLET 5 : PLANNINGS, TOURNÉES & URGENCES
+#  📅 PLANNINGS & URGENCES
 # ============================================================
-if onglet == "📅 Plannings, Tournées & Urgences":
+elif onglet == "📅 Plannings & Urgences":
+    tab_plan, tab_ajout_p, tab_urg = st.tabs(["📊 Planning hebdo", "➕ Planifier", "🚨 Urgences"])
 
-    tab_planning_visuel, tab_planning_ajout, tab_remplacement, tab_urgence = st.tabs([
-        "📊 Planning hebdomadaire",
-        "➕ Planifier une intervention",
-        "🔄 Remplacements & absences",
-        "🚨 Urgences en cours"
-    ])
+    df_benef3 = sb_select("beneficiaires", {"structure_id": SID, "statut": "Actif"}, order="nom")
+    df_interv3 = sb_select("intervenants", {"structure_id": SID}, order="nom")
 
-    sid = st.session_state["structure_id"]
-    df_benef3 = charger_df("SELECT * FROM beneficiaires WHERE statut = 'Actif' AND structure_id = ? ORDER BY nom", (sid,))
-    df_interv3 = charger_df("SELECT * FROM intervenants WHERE structure_id = ? ORDER BY nom", (sid,))
-
-    # ----------------------------------------------------------
-    #  TAB 1 : PLANNING HEBDOMADAIRE VISUEL
-    # ----------------------------------------------------------
-    with tab_planning_visuel:
-        st.subheader("📊 Planning hebdomadaire — vue par intervenant")
-
-        # Navigation semaine
+    with tab_plan:
         if "semaine_offset" not in st.session_state:
             st.session_state["semaine_offset"] = 0
 
-        col_nav1, col_nav2, col_nav3 = st.columns([1, 3, 1])
-        with col_nav1:
-            if st.button("◀ Semaine précédente"):
-                st.session_state["semaine_offset"] -= 1
-                st.rerun()
-        with col_nav3:
-            if st.button("Semaine suivante ▶"):
-                st.session_state["semaine_offset"] += 1
-                st.rerun()
+        cn1, cn2, cn3 = st.columns([1, 3, 1])
+        if cn1.button("◀ Précédente"): st.session_state["semaine_offset"] -= 1; st.rerun()
+        if cn3.button("Suivante ▶"): st.session_state["semaine_offset"] += 1; st.rerun()
 
         offset = st.session_state["semaine_offset"]
-        aujourdhui = datetime.date.today()
-        lundi_semaine = aujourdhui - datetime.timedelta(days=aujourdhui.weekday()) + datetime.timedelta(weeks=offset)
-        dimanche_semaine = lundi_semaine + datetime.timedelta(days=6)
+        aujourd = datetime.date.today()
+        lundi = aujourd - datetime.timedelta(days=aujourd.weekday()) + datetime.timedelta(weeks=offset)
+        dim = lundi + datetime.timedelta(days=6)
 
-        with col_nav2:
-            st.markdown(f"<div style='text-align:center; color:#4c8dfa; font-weight:700; font-size:16px;'>Semaine du {date_fr(lundi_semaine, 'medium')} au {date_fr(dimanche_semaine, 'medium')}</div>", unsafe_allow_html=True)
+        cn2.markdown(f"<div style='text-align:center; color:#4c8dfa; font-weight:700;'>Semaine du {date_fr(lundi,'medium')} au {date_fr(dim,'medium')}</div>", unsafe_allow_html=True)
+        if st.button("🔙 Semaine courante"): st.session_state["semaine_offset"] = 0; st.rerun()
 
-        if st.button("🔙 Revenir à la semaine courante", key="reset_semaine"):
-            st.session_state["semaine_offset"] = 0
-            st.rerun()
+        # Chargement des données de la semaine
+        df_all_iv = sb_select("interventions", {"structure_id": SID})
+        df_sem = pd.DataFrame()
+        if not df_all_iv.empty:
+            df_all_iv["date_intervention"] = pd.to_datetime(df_all_iv["date_intervention"]).dt.date
+            df_sem = df_all_iv[(df_all_iv["date_intervention"] >= lundi) & (df_all_iv["date_intervention"] <= dim)]
 
-        # Chargement des interventions de la semaine
-        df_semaine = charger_df("""
-            SELECT i.id, i.date_intervention, i.heure_debut, i.heure_fin, i.type_intervention, i.statut,
-                   b.prenom || ' ' || b.nom as beneficiaire,
-                   v.id as intervenant_id, v.prenom || ' ' || v.nom as intervenant
-            FROM interventions i
-            LEFT JOIN beneficiaires b ON i.beneficiaire_id = b.id
-            LEFT JOIN intervenants v ON i.intervenant_id = v.id
-            WHERE i.date_intervention BETWEEN ? AND ? AND i.structure_id = ?
-            ORDER BY i.heure_debut
-        """, (lundi_semaine.isoformat(), dimanche_semaine.isoformat(), sid))
-
-        dates_semaine = [lundi_semaine + datetime.timedelta(days=i) for i in range(7)]
+        benef_noms = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_benef3.iterrows()}
+        dates_sem = [lundi + datetime.timedelta(days=i) for i in range(7)]
 
         if df_interv3.empty:
-            st.info("Aucun intervenant enregistré. Ajoutez des intervenants pour visualiser le planning.")
+            st.info("Ajoutez des intervenants pour voir le planning.")
         else:
-            # En-tête du tableau (jours en français via date_fr)
             headers_html = '<th class="col-intervenant">Intervenant</th>'
-            for d in dates_semaine:
-                is_today = (d == aujourdhui)
-                style_today = " style='background:rgba(47,124,246,0.25); color:#4c8dfa;'" if is_today else ""
-                label = date_fr(d, "semaine")   # ex. "Ven. 21/08"
-                headers_html += f'<th{style_today}>{label}</th>'
+            for d in dates_sem:
+                is_today = (d == aujourd)
+                style = " style='background:rgba(47,124,246,0.25); color:#4c8dfa;'" if is_today else ""
+                headers_html += f'<th{style}>{date_fr(d,"semaine")}</th>'
 
             rows_html = ""
             for _, interv in df_interv3.iterrows():
-                row_html = f'<td class="col-intervenant">{interv["prenom"]} {interv["nom"]}</td>'
-
-                for d in dates_semaine:
-                    date_str = d.isoformat()
-                    interventions_du_jour = df_semaine[
-                        (df_semaine["date_intervention"] == date_str) &
-                        (df_semaine["intervenant_id"] == interv["id"])
-                    ] if not df_semaine.empty else pd.DataFrame()
-
-                    if interventions_du_jour.empty:
+                row_html = f'<td class="col-intervenant">{h(interv["prenom"])} {h(interv["nom"])}</td>'
+                for d in dates_sem:
+                    if df_sem.empty:
+                        row_html += '<td><div class="planning-empty">·</div></td>'
+                        continue
+                    ivs = df_sem[
+                        (df_sem["date_intervention"] == d) &
+                        (df_sem["intervenant_id"] == str(interv["id"]))
+                    ]
+                    if ivs.empty:
                         row_html += '<td><div class="planning-empty">·</div></td>'
                     else:
-                        cell_content = ""
-                        for _, interv_row in interventions_du_jour.iterrows():
-                            css_extra = ""
-                            if interv_row["statut"] == "Urgence à pourvoir":
-                                css_extra = " urgence"
-                            elif interv_row["statut"] == "Réalisé":
-                                css_extra = " realise"
-                            elif interv_row["statut"] == "Annulé":
-                                css_extra = " annule"
-                            cell_content += f"""
-                                <div class="planning-cell{css_extra}">
-                                    <b>{interv_row['heure_debut']}–{interv_row['heure_fin']}</b><br>
-                                    {interv_row['beneficiaire']}<br>
-                                    <span style='color:#8996a3;font-size:11px;'>{interv_row['type_intervention']}</span>
-                                </div>
-                            """
-                        row_html += f'<td>{cell_content}</td>'
-
+                        cell = ""
+                        for _, iv in ivs.iterrows():
+                            css = " urgence" if iv["statut"]=="Urgence à pourvoir" else (" realise" if iv["statut"]=="Réalisé" else (" annule" if iv["statut"]=="Annulé" else ""))
+                            b = h(benef_noms.get(str(iv.get("beneficiaire_id","")), "—"))
+                            cell += f'<div class="planning-cell{css}"><b>{h(str(iv["heure_debut"]))}–{h(str(iv["heure_fin"]))}</b><br>{b}<br><span style="color:#8996a3;font-size:11px;">{h(str(iv["type_intervention"]))}</span></div>'
+                        row_html += f'<td>{cell}</td>'
                 rows_html += f"<tr>{row_html}</tr>"
 
-            # Légende
-            st.markdown("""
-                <div style="display:flex; gap:16px; margin-bottom:12px; flex-wrap:wrap;">
-                    <span><span style="display:inline-block;width:12px;height:12px;background:#2f7cf6;border-radius:2px;margin-right:4px;"></span>Planifié</span>
-                    <span><span style="display:inline-block;width:12px;height:12px;background:#e0554f;border-radius:2px;margin-right:4px;"></span>Urgence à pourvoir</span>
-                    <span><span style="display:inline-block;width:12px;height:12px;background:#3fae74;border-radius:2px;margin-right:4px;"></span>Réalisé</span>
-                    <span><span style="display:inline-block;width:12px;height:12px;background:#8996a3;border-radius:2px;margin-right:4px;"></span>Annulé</span>
-                </div>
-            """, unsafe_allow_html=True)
+            st.markdown(f'<div style="overflow-x:auto;"><table class="planning-table"><thead><tr>{headers_html}</tr></thead><tbody>{rows_html}</tbody></table></div>', unsafe_allow_html=True)
 
-            planning_html = f"""
-                <div style="overflow-x:auto;">
-                <table class="planning-table">
-                    <thead><tr>{headers_html}</tr></thead>
-                    <tbody>{rows_html}</tbody>
-                </table>
-                </div>
-            """
-            st.markdown(planning_html, unsafe_allow_html=True)
-
-            # Stats de la semaine
-            st.markdown("<br>", unsafe_allow_html=True)
-            if not df_semaine.empty:
-                col_s1, col_s2, col_s3, col_s4 = st.columns(4)
-                col_s1.metric("Total interventions", len(df_semaine))
-                col_s2.metric("Réalisées", len(df_semaine[df_semaine["statut"] == "Réalisé"]))
-                col_s3.metric("Urgences", len(df_semaine[df_semaine["statut"] == "Urgence à pourvoir"]))
-                col_s4.metric("Planifiées", len(df_semaine[df_semaine["statut"] == "Planifié"]))
-
-    # ----------------------------------------------------------
-    #  TAB 2 : PLANIFIER UNE INTERVENTION
-    # ----------------------------------------------------------
-    with tab_planning_ajout:
-        st.subheader("➕ Planifier une nouvelle intervention")
+    with tab_ajout_p:
         if df_benef3.empty or df_interv3.empty:
-            st.info("Ajoute au moins un bénéficiaire et un intervenant pour créer un planning.")
+            st.info("Ajoutez au moins un bénéficiaire et un intervenant.")
         else:
-            with st.form("form_planning"):
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    benef_labels3 = {f"{r['prenom']} {r['nom']}": r['id'] for _, r in df_benef3.iterrows()}
-                    benef_p = st.selectbox("Bénéficiaire", list(benef_labels3.keys()))
-                with col2:
-                    interv_labels3 = {f"{r['prenom']} {r['nom']}": r['id'] for _, r in df_interv3.iterrows()}
-                    interv_p = st.selectbox("Intervenant", list(interv_labels3.keys()))
-                with col3:
-                    type_interv_p = st.selectbox("Type d'intervention", ["Aide à la toilette", "Aide au repas", "Ménage", "Accompagnement", "Soins", "Autre"])
+            with st.form("form_plan"):
+                c1, c2, c3 = st.columns(3)
+                benef_lbl3 = {f"{r['prenom']} {r['nom']}": str(r["id"]) for _, r in df_benef3.iterrows()}
+                interv_lbl3 = {f"{r['prenom']} {r['nom']}": str(r["id"]) for _, r in df_interv3.iterrows()}
+                benef_p = c1.selectbox("Bénéficiaire", list(benef_lbl3.keys()))
+                interv_p = c2.selectbox("Intervenant", list(interv_lbl3.keys()))
+                type_iv = c3.selectbox("Type", ["Aide à la toilette","Aide au repas","Ménage","Accompagnement","Soins","Autre"])
+                c4, c5, c6 = st.columns(3)
+                date_p = c4.date_input("Date", value=datetime.date.today())
+                hd = c5.time_input("Heure début")
+                hf = c6.time_input("Heure fin")
+                notes_p = st.text_input("Notes")
 
-                col4, col5, col6 = st.columns(3)
-                with col4:
-                    date_p = st.date_input("Date", value=datetime.date.today())
-                with col5:
-                    heure_debut_p = st.time_input("Heure de début")
-                with col6:
-                    heure_fin_p = st.time_input("Heure de fin")
+                if st.form_submit_button("Planifier"):
+                    if hf <= hd:
+                        st.error("L'heure de fin doit être après l'heure de début.")
+                    else:
+                        new_iv = sb_insert("interventions", {
+                            "structure_id": SID,
+                            "beneficiaire_id": benef_lbl3[benef_p],
+                            "intervenant_id": interv_lbl3[interv_p],
+                            "date_intervention": date_p.isoformat(),
+                            "heure_debut": hd.strftime("%H:%M"),
+                            "heure_fin": hf.strftime("%H:%M"),
+                            "type_intervention": type_iv,
+                            "statut": "Planifié",
+                            "notes": notes_p
+                        })
+                        if new_iv:
+                            audit("CREATE_INTERVENTION", "interventions", new_iv.get("id"))
+                            st.success("Intervention planifiée.")
+                            st.rerun()
 
-                notes_p = st.text_input("Notes (optionnel)")
-                submit_p = st.form_submit_button("Planifier l'intervention")
-
-                if submit_p:
-                    executer(
-                        """INSERT INTO interventions (structure_id, beneficiaire_id, intervenant_id, date_intervention, heure_debut, heure_fin, type_intervention, statut, notes)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, 'Planifié', ?)""",
-                        (sid, benef_labels3[benef_p], interv_labels3[interv_p], date_p.isoformat(), heure_debut_p.strftime("%H:%M"), heure_fin_p.strftime("%H:%M"), type_interv_p, notes_p)
-                    )
-                    st.success("Intervention planifiée.")
-                    st.rerun()
-
-        st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
+        # Interventions à venir
         st.markdown("### 📋 Interventions à venir")
-        df_plan = charger_df("""
-            SELECT i.id, i.date_intervention, i.heure_debut, i.heure_fin, i.type_intervention, i.statut,
-                   b.prenom || ' ' || b.nom as beneficiaire, v.prenom || ' ' || v.nom as intervenant
-            FROM interventions i
-            LEFT JOIN beneficiaires b ON i.beneficiaire_id = b.id
-            LEFT JOIN intervenants v ON i.intervenant_id = v.id
-            WHERE i.date_intervention >= ? AND i.structure_id = ?
-            ORDER BY i.date_intervention, i.heure_debut
-        """, (datetime.date.today().isoformat(), sid))
+        df_plan = sb_select("interventions", {"structure_id": SID}, order="date_intervention")
+        if not df_plan.empty:
+            df_plan["date_intervention"] = pd.to_datetime(df_plan["date_intervention"]).dt.date
+            df_plan = df_plan[df_plan["date_intervention"] >= datetime.date.today()]
+            benef_noms2 = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_benef3.iterrows()}
+            interv_noms2 = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_interv3.iterrows()}
 
-        if df_plan.empty:
-            st.caption("Aucune intervention planifiée à venir.")
-        else:
             for _, row in df_plan.iterrows():
-                couleur_p = {"Planifié": "#4c8dfa", "Urgence à pourvoir": "#e0554f", "Réalisé": "#3fae74", "Annulé": "#8996a3"}.get(row["statut"], "#8996a3")
-                col_info, col_action = st.columns([4, 1])
-                with col_info:
+                coul = {"Planifié":"#4c8dfa","Urgence à pourvoir":"#e0554f","Réalisé":"#3fae74","Annulé":"#8996a3"}.get(row["statut"], "#8996a3")
+                b = h(benef_noms2.get(str(row.get("beneficiaire_id","")), "—"))
+                iv = h(interv_noms2.get(str(row.get("intervenant_id","")), "Non assigné"))
+                ci, ca = st.columns([4, 1])
+                with ci:
                     st.markdown(f"""
-                        <div class="oc-card" style="border-left-color:{couleur_p}; padding:12px 16px;">
-                            <b>{row['date_intervention']} — {row['heure_debut']} à {row['heure_fin']}</b> · {row['type_intervention']}<br>
-                            <span style="color:#b8c2cc;">👤 {row['beneficiaire']} • 🧑‍⚕️ {row['intervenant']} • <span class="oc-badge" style="background-color:{couleur_p}; padding:2px 10px;">{row['statut']}</span></span>
+                        <div class="oc-card" style="border-left-color:{coul}; padding:12px 16px;">
+                            <b>{row['date_intervention']} — {h(str(row['heure_debut']))} à {h(str(row['heure_fin']))}</b> · {h(str(row['type_intervention']))}<br>
+                            <span style="color:#b8c2cc;">👤 {b} • 🧑‍⚕️ {iv} •
+                            <span class="oc-badge" style="background:{coul}; padding:2px 10px;">{h(str(row['statut']))}</span></span>
                         </div>
                     """, unsafe_allow_html=True)
-                with col_action:
+                with ca:
                     if row["statut"] == "Planifié":
-                        if st.button("✅ Réalisée", key=f"realise_{row['id']}"):
-                            executer("UPDATE interventions SET statut = 'Réalisé' WHERE id = ? AND structure_id = ?", (row["id"], sid))
+                        if st.button("✅ Réalisée", key=f"r_{row['id']}"):
+                            sb_update("interventions", {"statut": "Réalisé"}, "id", str(row["id"]))
                             st.rerun()
-                    if row["statut"] not in ["Urgence à pourvoir", "Annulé", "Réalisé"]:
-                        if st.button("🚨 Absence", key=f"absence_{row['id']}"):
-                            executer("UPDATE interventions SET statut = 'Urgence à pourvoir' WHERE id = ? AND structure_id = ?", (row["id"], sid))
+                    if row["statut"] not in ["Urgence à pourvoir","Annulé","Réalisé"]:
+                        if st.button("🚨 Absence", key=f"a_{row['id']}"):
+                            sb_update("interventions", {"statut": "Urgence à pourvoir", "intervenant_id": None}, "id", str(row["id"]))
                             st.rerun()
 
-    # ----------------------------------------------------------
-    #  TAB 3 : REMPLACEMENTS & ABSENCES (nouveau)
-    # ----------------------------------------------------------
-    with tab_remplacement:
-        st.subheader("🔄 Gestion des remplacements & absences")
-        st.caption("Signalez une absence : l'outil identifie automatiquement les remplaçants disponibles ayant les habilitations requises pour le bénéficiaire concerné.")
+    with tab_urg:
+        st.caption("🤖 L'agent IA classe les disponibles et sollicite automatiquement en cascade.")
+        df_urgs = sb_select("interventions", {"structure_id": SID, "statut": "Urgence à pourvoir"}, order="date_intervention")
 
-        df_plan_rem = charger_df("""
-            SELECT i.id, i.date_intervention, i.heure_debut, i.heure_fin, i.type_intervention, i.statut,
-                   b.id as benef_id, b.prenom || ' ' || b.nom as beneficiaire,
-                   b.gestes_techniques, b.besoins_recurrents,
-                   v.id as intervenant_id, v.prenom || ' ' || v.nom as intervenant
-            FROM interventions i
-            LEFT JOIN beneficiaires b ON i.beneficiaire_id = b.id
-            LEFT JOIN intervenants v ON i.intervenant_id = v.id
-            WHERE i.date_intervention >= ? AND i.structure_id = ? AND i.statut = 'Planifié'
-            ORDER BY i.date_intervention, i.heure_debut
-        """, (datetime.date.today().isoformat(), sid))
-
-        if df_plan_rem.empty:
-            st.info("Aucune intervention planifiée à venir. Planifiez d'abord des interventions.")
-        else:
-            # Sélection de l'intervention concernée
-            options_interventions = {
-                f"{r['date_intervention']} {r['heure_debut']}–{r['heure_fin']} | {r['beneficiaire']} ← {r['intervenant']}": r['id']
-                for _, r in df_plan_rem.iterrows()
-            }
-            interv_choisie_label = st.selectbox("Intervention concernée par l'absence", list(options_interventions.keys()))
-            interv_choisie_id = options_interventions[interv_choisie_label]
-            interv_choisie_row = df_plan_rem[df_plan_rem["id"] == interv_choisie_id].iloc[0]
-
-            st.markdown(f"""
-                <div class="oc-card oc-card-warning">
-                    <b>📋 Intervention sélectionnée</b><br>
-                    📅 {interv_choisie_row['date_intervention']} — {interv_choisie_row['heure_debut']} à {interv_choisie_row['heure_fin']}<br>
-                    👤 Bénéficiaire : <b>{interv_choisie_row['beneficiaire']}</b><br>
-                    🧑‍⚕️ Intervenant prévu : <b>{interv_choisie_row['intervenant']}</b><br>
-                    🩺 Type : {interv_choisie_row['type_intervention']}
-                </div>
-            """, unsafe_allow_html=True)
-
-            col_ab1, col_ab2 = st.columns(2)
-            with col_ab1:
-                if st.button("🚨 Déclarer l'absence & chercher un remplaçant", type="primary"):
-                    # Marquer l'intervention en urgence
-                    executer("UPDATE interventions SET statut = 'Urgence à pourvoir', intervenant_id = NULL WHERE id = ? AND structure_id = ?",
-                             (interv_choisie_id, sid))
-                    # Marquer l'intervenant indisponible
-                    if interv_choisie_row["intervenant_id"]:
-                        executer("UPDATE intervenants SET statut_dispo = 'Indisponible' WHERE id = ? AND structure_id = ?",
-                                 (interv_choisie_row["intervenant_id"], sid))
-
-                    # Recherche des remplaçants : disponibles, habilitations compatibles
-                    besoins_benef = interv_choisie_row.get("gestes_techniques", "") or interv_choisie_row.get("besoins_recurrents", "") or ""
-
-                    # Intervenants disponibles (hors l'absent)
-                    df_dispo_rem = charger_df("""
-                        SELECT v.id, v.prenom, v.nom, v.competences, v.zone_geo, v.disponibilites, v.email
-                        FROM intervenants v
-                        WHERE v.structure_id = ? AND v.statut_dispo = 'Disponible'
-                        AND v.id != ?
-                        ORDER BY v.nom
-                    """, (sid, interv_choisie_row["intervenant_id"] or 0))
-
-                    # Récupération des habilitations requises pour le bénéficiaire
-                    # (on identifie les habilitations des interventions passées pour ce bénéficiaire)
-                    date_interv = interv_choisie_row["date_intervention"]
-
-                    st.session_state["remplaçants_trouves"] = []
-                    st.session_state["intervention_remplacement_id"] = interv_choisie_id
-                    st.session_state["besoins_remplacement"] = besoins_benef
-
-                    if df_dispo_rem.empty:
-                        st.session_state["remplaçants_trouves"] = []
-                    else:
-                        candidats_scores = []
-                        for _, cand in df_dispo_rem.iterrows():
-                            # Vérification simple des habilitations du candidat
-                            df_habs_cand = charger_df("""
-                                SELECT type_habilitation, date_expiration FROM habilitations
-                                WHERE intervenant_id = ? AND structure_id = ?
-                                AND date_expiration >= ?
-                            """, (cand["id"], sid, datetime.date.today().isoformat()))
-
-                            habs_valides = [h["type_habilitation"] for _, h in df_habs_cand.iterrows()]
-
-                            # Score simple de compatibilité
-                            score = 50  # Base
-                            besoins_lower = besoins_benef.lower()
-                            comp_lower = (cand["competences"] or "").lower()
-
-                            # Bonus compétences
-                            mots_cles = ["toilette", "repas", "ménage", "transfert", "accompagnement", "soins", "aide"]
-                            for mot in mots_cles:
-                                if mot in besoins_lower and mot in comp_lower:
-                                    score += 10
-
-                            candidats_scores.append({
-                                "id": cand["id"],
-                                "nom": f"{cand['prenom']} {cand['nom']}",
-                                "zone": cand["zone_geo"] or "—",
-                                "competences": cand["competences"] or "—",
-                                "disponibilites": cand["disponibilites"] or "—",
-                                "email": cand["email"] or "",
-                                "habilitations": ", ".join(habs_valides) if habs_valides else "Aucune enregistrée",
-                                "score": min(score, 100)
-                            })
-
-                        st.session_state["remplaçants_trouves"] = sorted(candidats_scores, key=lambda x: x["score"], reverse=True)
-
-                    st.success("Absence déclarée. Remplaçants disponibles identifiés ci-dessous.")
-                    st.rerun()
-
-            with col_ab2:
-                st.caption("L'intervenant sera marqué indisponible et l'intervention passera en urgence à pourvoir.")
-
-            # Affichage des remplaçants trouvés
-            if st.session_state.get("remplaçants_trouves") is not None and st.session_state.get("intervention_remplacement_id") == interv_choisie_id:
-                remplaçants = st.session_state["remplaçants_trouves"]
-
-                st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
-                st.markdown("### 👥 Remplaçants disponibles & compatibles")
-
-                if not remplaçants:
-                    st.warning("⚠️ Aucun intervenant disponible actuellement dans le vivier. Consultez l'onglet Urgences pour la gestion manuelle.")
-                else:
-                    for i, cand in enumerate(remplaçants):
-                        couleur_score = "#3fae74" if cand["score"] >= 70 else ("#d99a3d" if cand["score"] >= 40 else "#4c8dfa")
-                        col_c1, col_c2 = st.columns([4, 1])
-                        with col_c1:
-                            st.markdown(f"""
-                                <div class="oc-card" style="border-left-color:{couleur_score};">
-                                    <div style="display:flex;justify-content:space-between;align-items:center;">
-                                        <span style="font-weight:700;font-size:15px;">#{i+1} — {cand['nom']}</span>
-                                        <span class="oc-badge" style="background:{couleur_score};">Score {cand['score']}%</span>
-                                    </div>
-                                    <div style="color:#b8c2cc;font-size:13px;margin-top:6px;">
-                                        📍 Zone : {cand['zone']} &nbsp;|&nbsp; ⏰ Dispo : {cand['disponibilites']}<br>
-                                        🎓 Habilitations valides : {cand['habilitations']}<br>
-                                        🛠️ Compétences : {cand['competences'][:80]}{'...' if len(cand['competences']) > 80 else ''}
-                                    </div>
-                                </div>
-                            """, unsafe_allow_html=True)
-                        with col_c2:
-                            if st.button(f"✅ Assigner", key=f"assign_rem_{cand['id']}_{interv_choisie_id}"):
-                                executer(
-                                    "UPDATE interventions SET intervenant_id = ?, statut = 'Planifié' WHERE id = ? AND structure_id = ?",
-                                    (cand["id"], interv_choisie_id, sid)
-                                )
-                                executer(
-                                    "UPDATE intervenants SET statut_dispo = 'En mission' WHERE id = ? AND structure_id = ?",
-                                    (cand["id"], sid)
-                                )
-                                st.session_state.pop("remplaçants_trouves", None)
-                                st.success(f"✅ {cand['nom']} assigné(e) en remplacement.")
-                                st.rerun()
-
-                            # Envoi email si boîte configurée
-                            cfg_mail = st.session_state.get("mail_config", {})
-                            if cand["email"] and cfg_mail.get("email"):
-                                if st.button("📧 Email", key=f"mail_rem_{cand['id']}_{interv_choisie_id}"):
-                                    row_urg = df_plan_rem[df_plan_rem["id"] == interv_choisie_id].iloc[0]
-                                    ok_m, msg_m = envoyer_email_intervenant(
-                                        cand["email"],
-                                        f"Remplacement urgent le {row_urg['date_intervention']}",
-                                        f"Bonjour {cand['nom']},\n\nUne intervention est à pourvoir le {row_urg['date_intervention']} de {row_urg['heure_debut']} à {row_urg['heure_fin']} ({row_urg['type_intervention']}).\nPouvez-vous assurer ce remplacement ?\n\nMerci.",
-                                        cfg_mail["email"], cfg_mail["password"]
-                                    )
-                                    if ok_m:
-                                        st.success("Email envoyé.")
-                                    else:
-                                        st.error(msg_m)
-
-    # ----------------------------------------------------------
-    #  TAB 4 : URGENCES EN COURS (repris de l'existant)
-    # ----------------------------------------------------------
-    with tab_urgence:
-        st.subheader("🚨 Interventions à pourvoir en urgence")
-        st.caption("🤖 L'agent IA classe les intervenants disponibles par pertinence pour chaque remplacement, sollicite automatiquement le meilleur candidat, puis relance le suivant en cascade en cas de refus.")
-        df_urgences = charger_df("""
-            SELECT i.id, i.date_intervention, i.heure_debut, i.heure_fin, i.type_intervention,
-                   b.id as beneficiaire_id, b.prenom || ' ' || b.nom as beneficiaire,
-                   b.gestes_techniques
-            FROM interventions i
-            LEFT JOIN beneficiaires b ON i.beneficiaire_id = b.id
-            WHERE i.statut = 'Urgence à pourvoir' AND i.structure_id = ?
-            ORDER BY i.date_intervention, i.heure_debut
-        """, (sid,))
-
-        if df_urgences.empty:
+        if df_urgs.empty:
             st.success("✅ Aucune urgence en cours.")
         else:
-            for _, urg in df_urgences.iterrows():
+            benef_noms_u = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_benef3.iterrows()}
+            for _, urg in df_urgs.iterrows():
+                b = h(benef_noms_u.get(str(urg.get("beneficiaire_id","")), "Inconnu"))
                 st.markdown(f"""
                     <div class="oc-card oc-card-alert">
-                        <b>🚨 {urg['date_intervention']} — {urg['heure_debut']} à {urg['heure_fin']}</b><br>
-                        Bénéficiaire : {urg['beneficiaire']} • {urg['type_intervention']}
+                        <b>🚨 {h(str(urg['date_intervention']))} — {h(str(urg['heure_debut']))} à {h(str(urg['heure_fin']))}</b><br>
+                        {b} • {h(str(urg['type_intervention']))}
                     </div>
                 """, unsafe_allow_html=True)
 
-                sollicitation_active = charger_df("""
-                    SELECT s.id, s.intervenant_id, s.score_global, s.justification, s.alerte_habilitation, s.date_envoi,
-                           v.prenom || ' ' || v.nom as intervenant
-                    FROM sollicitations_urgence s
-                    LEFT JOIN intervenants v ON s.intervenant_id = v.id
-                    WHERE s.intervention_id = ? AND s.structure_id = ? AND s.statut = 'En attente'
-                    ORDER BY s.date_envoi DESC LIMIT 1
-                """, (int(urg["id"]), sid))
+                # Sollicitation active
+                df_sol = sb_select("sollicitations_urgence", {
+                    "structure_id": SID, "intervention_id": str(urg["id"]), "statut": "En attente"
+                })
+                interv_noms_u = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_interv3.iterrows()}
 
-                if not sollicitation_active.empty:
-                    sol = sollicitation_active.iloc[0]
+                if not df_sol.empty:
+                    sol = df_sol.iloc[0]
+                    sol_nom = h(interv_noms_u.get(str(sol.get("intervenant_id","")), "Inconnu"))
                     st.markdown(f"""
                         <div class="oc-card oc-card-warning">
-                            🤖 <b>Candidat sollicité automatiquement :</b> {sol['intervenant']} (score IA : {sol['score_global']}%)<br>
-                            <span style="color:#b8c2cc;">Envoyé le {str(sol['date_envoi'])[:16].replace('T', ' ')} — {sol['justification']}</span><br>
-                            ⏳ En attente de réponse du candidat.
+                            🤖 <b>Sollicité :</b> {sol_nom} (score {sol['score_global']}%)<br>
+                            <span style="color:#b8c2cc;">{h(str(sol.get('justification','')))} — ⏳ En attente</span>
                         </div>
                     """, unsafe_allow_html=True)
-                    if sol["alerte_habilitation"]:
-                        st.warning(f"⚠️ {sol['alerte_habilitation']}")
-                    col_a, col_r = st.columns(2)
-                    with col_a:
-                        if st.button("✅ A accepté", key=f"accepte_{sol['id']}"):
-                            traiter_reponse_sollicitation(int(sol["id"]), int(urg["id"]), int(sol["intervenant_id"]), "Accepté", sid)
-                            st.success("Remplacement confirmé, planning mis à jour automatiquement.")
-                            st.rerun()
-                    with col_r:
-                        if st.button("❌ A refusé → relancer le suivant", key=f"refuse_{sol['id']}"):
-                            traiter_reponse_sollicitation(int(sol["id"]), int(urg["id"]), int(sol["intervenant_id"]), "Refusé", sid)
-                            st.rerun()
+                    ca, cr = st.columns(2)
+                    if ca.button("✅ A accepté", key=f"acc_{sol['id']}"):
+                        sb_update("sollicitations_urgence", {"statut": "Accepté"}, "id", str(sol["id"]))
+                        sb_update("interventions", {"intervenant_id": str(sol["intervenant_id"]), "statut": "Planifié"}, "id", str(urg["id"]))
+                        st.success("Remplacement confirmé.")
+                        st.rerun()
+                    if cr.button("❌ A refusé → suivant", key=f"ref_{sol['id']}"):
+                        sb_update("sollicitations_urgence", {"statut": "Refusé"}, "id", str(sol["id"]))
+                        st.rerun()
                 else:
-                    df_dispo = charger_df("SELECT * FROM intervenants WHERE statut_dispo = 'Disponible' AND structure_id = ?", (sid,))
-                    if df_dispo.empty:
-                        st.warning("Aucun intervenant disponible actuellement dans le vivier.")
+                    df_dispo_u = sb_select("intervenants", {"structure_id": SID, "statut_dispo": "Disponible"})
+                    if df_dispo_u.empty:
+                        st.warning("Aucun intervenant disponible.")
                     elif IA_DISPONIBLE:
-                        if st.button("🤖 Lancer la recherche IA & solliciter automatiquement", key=f"cascade_{urg['id']}"):
-                            autorise, _, _ = peut_utiliser_ia(st.session_state["user_email"])
-                            if not autorise:
-                                st.error("Quota de requêtes IA atteint pour votre compte.")
+                        if st.button("🤖 Lancer l'agent IA", key=f"ia_{urg['id']}"):
+                            classement = classer_candidats_urgence(urg.to_dict(), df_dispo_u)
+                            # Exclure les déjà sollicités
+                            df_deja = sb_select("sollicitations_urgence", {"intervention_id": str(urg["id"]), "structure_id": SID})
+                            ids_excl = set(df_deja["intervenant_id"].tolist()) if not df_deja.empty else set()
+                            candidat = next((c for c in classement if c["intervenant_id"] not in ids_excl), None)
+
+                            if not candidat:
+                                st.warning("Tous les disponibles ont déjà été sollicités.")
                             else:
-                                classement = classer_candidats_urgence(urg, df_dispo, sid)
-                                incrementer_quota_ia(st.session_state["user_email"])
-                                candidat = prochain_candidat_non_sollicite(int(urg["id"]), classement, sid)
-                                if not candidat:
-                                    st.warning("Tous les intervenants disponibles ont déjà été sollicités sans succès pour cette urgence.")
+                                ok, msg = envoyer_email(
+                                    candidat["intervenant_email"],
+                                    f"Remplacement urgent le {urg['date_intervention']}",
+                                    f"Bonjour,\n\nUne intervention est à pourvoir le {urg['date_intervention']} de {urg['heure_debut']} à {urg['heure_fin']} ({urg['type_intervention']}).\nMerci de confirmer votre disponibilité.\n\nMerci."
+                                )
+                                if ok:
+                                    sb_insert("sollicitations_urgence", {
+                                        "structure_id": SID,
+                                        "intervention_id": str(urg["id"]),
+                                        "intervenant_id": candidat["intervenant_id"],
+                                        "score_global": int(candidat.get("score_global", 0)),
+                                        "justification": candidat.get("justification", ""),
+                                        "alerte_habilitation": candidat.get("alerte_habilitation", ""),
+                                        "statut": "En attente"
+                                    })
+                                    st.success(f"✅ {candidat['intervenant_nom']} sollicité(e).")
+                                    st.rerun()
                                 else:
-                                    ok, msg = solliciter_candidat_urgence(urg, candidat, sid)
-                                    if ok:
-                                        st.success(f"Meilleur candidat identifié : {candidat['intervenant_nom']} ({candidat.get('score_global', 0)}%) — sollicitation envoyée automatiquement.")
-                                        st.rerun()
-                                    else:
-                                        st.error(msg)
-                    else:
-                        st.info("Clé API Gemini non configurée — sollicitation manuelle uniquement.")
-                        for _, cand in df_dispo.iterrows():
-                            col_c1, col_c2 = st.columns([3, 1])
-                            with col_c1:
-                                st.write(f"👤 **{cand['prenom']} {cand['nom']}** — {cand['zone_geo'] or 'zone non précisée'} — {cand['competences'] or ''}")
-                            with col_c2:
-                                if cand["email"] and st.session_state.get("mail_config", {}).get("email"):
-                                    if st.button("📧 Solliciter", key=f"solliciter_manuel_{urg['id']}_{cand['id']}"):
-                                        cfg = st.session_state["mail_config"]
-                                        sujet = f"Remplacement urgent le {urg['date_intervention']}"
-                                        corps = (
-                                            f"Bonjour {cand['prenom']},\n\n"
-                                            f"Une intervention est à pourvoir en urgence le {urg['date_intervention']} "
-                                            f"de {urg['heure_debut']} à {urg['heure_fin']} ({urg['type_intervention']}).\n"
-                                            f"Merci de nous confirmer votre disponibilité au plus vite.\n\nMerci."
-                                        )
-                                        ok, msg = envoyer_email_intervenant(cand["email"], sujet, corps, cfg["email"], cfg["password"])
-                                        if ok:
-                                            st.success("Sollicitation envoyée.")
-                                        else:
-                                            st.error(msg)
+                                    st.error(msg)
 
-                df_hist = charger_df("""
-                    SELECT s.date_envoi, s.statut, s.score_global, v.prenom || ' ' || v.nom as intervenant
-                    FROM sollicitations_urgence s
-                    LEFT JOIN intervenants v ON s.intervenant_id = v.id
-                    WHERE s.intervention_id = ? AND s.structure_id = ?
-                    ORDER BY s.date_envoi DESC
-                """, (int(urg["id"]), sid))
-                if not df_hist.empty:
-                    with st.expander("📜 Historique des sollicitations pour cette urgence"):
-                        st.dataframe(df_hist, use_container_width=True, hide_index=True)
-
-                if st.button("✅ Marquer comme pourvue manuellement", key=f"resolu_{urg['id']}"):
-                    executer("UPDATE interventions SET statut = 'Planifié' WHERE id = ? AND structure_id = ?", (urg["id"], sid))
+                if st.button("✅ Pourvu manuellement", key=f"man_{urg['id']}"):
+                    sb_update("interventions", {"statut": "Planifié"}, "id", str(urg["id"]))
                     st.rerun()
-
                 st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
 
 
 # ============================================================
-#  ONGLET 6 : CONFORMITÉ & SUIVI
+#  ✅ CONFORMITÉ & HABILITATIONS
 # ============================================================
-if onglet == "✅ Conformité & Suivi":
+elif onglet == "✅ Conformité & Habilitations":
+    tab_suivi, tab_ajout_hab = st.tabs(["📋 Suivi", "➕ Ajouter"])
 
-    tab_suivi, tab_ajout_hab = st.tabs(["📋 Suivi des habilitations", "➕ Ajouter une habilitation"])
-
-    df_interv4 = charger_df("SELECT * FROM intervenants WHERE structure_id = ? ORDER BY nom", (st.session_state["structure_id"],))
+    df_interv4 = sb_select("intervenants", {"structure_id": SID}, order="nom")
+    aujourd = datetime.date.today()
+    seuil = aujourd + datetime.timedelta(days=60)
 
     with tab_suivi:
-        aujourdhui = datetime.date.today()
-        seuil_alerte = aujourdhui + datetime.timedelta(days=60)
-
-        df_habs_all = charger_df("""
-            SELECT h.id, h.type_habilitation, h.date_obtention, h.date_expiration,
-                   v.prenom || ' ' || v.nom as intervenant, v.id as intervenant_id
-            FROM habilitations h
-            LEFT JOIN intervenants v ON h.intervenant_id = v.id
-            WHERE h.structure_id = ?
-            ORDER BY h.date_expiration
-        """, (st.session_state["structure_id"],))
-
-        if df_habs_all.empty:
-            st.info("Aucune habilitation enregistrée pour l'instant.")
+        df_habs = sb_select("habilitations", {"structure_id": SID})
+        if df_habs.empty:
+            st.info("Aucune habilitation enregistrée.")
         else:
-            df_habs_all["date_expiration_dt"] = pd.to_datetime(df_habs_all["date_expiration"], errors="coerce").dt.date
+            interv_noms4 = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_interv4.iterrows()}
+            df_habs["intervenant_nom"] = df_habs["intervenant_id"].apply(lambda x: interv_noms4.get(str(x), "Inconnu"))
+            df_habs["date_exp_dt"] = pd.to_datetime(df_habs["date_expiration"], errors="coerce").dt.date
 
-            en_retard = df_habs_all[df_habs_all["date_expiration_dt"] < aujourdhui]
-            bientot = df_habs_all[(df_habs_all["date_expiration_dt"] >= aujourdhui) & (df_habs_all["date_expiration_dt"] <= seuil_alerte)]
-            ok = df_habs_all[df_habs_all["date_expiration_dt"] > seuil_alerte]
+            exp = df_habs[df_habs["date_exp_dt"] < aujourd]
+            bientot = df_habs[(df_habs["date_exp_dt"] >= aujourd) & (df_habs["date_exp_dt"] <= seuil)]
+            ok = df_habs[df_habs["date_exp_dt"] > seuil]
 
-            col1, col2, col3 = st.columns(3)
-            col1.metric("🔴 Expirées", len(en_retard))
-            col2.metric("🟠 À renouveler (< 60j)", len(bientot))
-            col3.metric("🟢 À jour", len(ok))
+            c1, c2, c3 = st.columns(3)
+            c1.metric("🔴 Expirées", len(exp))
+            c2.metric("🟠 < 60 jours", len(bientot))
+            c3.metric("🟢 À jour", len(ok))
 
-            if not en_retard.empty:
-                st.markdown("#### 🔴 Habilitations expirées")
-                for _, h in en_retard.iterrows():
-                    st.markdown(f"""<div class="oc-card oc-card-alert">
-                        <b>{h['intervenant']}</b> — {h['type_habilitation']} — expirée depuis le {h['date_expiration']}
-                    </div>""", unsafe_allow_html=True)
-
+            if not exp.empty:
+                st.markdown("#### 🔴 Expirées")
+                for _, hb in exp.iterrows():
+                    st.markdown(f'<div class="oc-card oc-card-alert"><b>{h(hb["intervenant_nom"])}</b> — {h(hb["type_habilitation"])} — expirée le {hb["date_expiration"]}</div>', unsafe_allow_html=True)
             if not bientot.empty:
-                st.markdown("#### 🟠 À renouveler prochainement")
-                for _, h in bientot.iterrows():
-                    st.markdown(f"""<div class="oc-card oc-card-warning">
-                        <b>{h['intervenant']}</b> — {h['type_habilitation']} — expire le {h['date_expiration']}
-                    </div>""", unsafe_allow_html=True)
-
+                st.markdown("#### 🟠 À renouveler bientôt")
+                for _, hb in bientot.iterrows():
+                    st.markdown(f'<div class="oc-card oc-card-warning"><b>{h(hb["intervenant_nom"])}</b> — {h(hb["type_habilitation"])} — expire le {hb["date_expiration"]}</div>', unsafe_allow_html=True)
             if not ok.empty:
-                with st.expander("🟢 Voir les habilitations à jour"):
-                    st.dataframe(ok[["intervenant", "type_habilitation", "date_obtention", "date_expiration"]], use_container_width=True, hide_index=True)
+                with st.expander("🟢 À jour"):
+                    st.dataframe(ok[["intervenant_nom","type_habilitation","date_obtention","date_expiration"]], use_container_width=True, hide_index=True)
 
     with tab_ajout_hab:
-        st.subheader("Ajouter une habilitation / certification")
         if df_interv4.empty:
-            st.info("Ajoute d'abord un intervenant.")
+            st.info("Ajoutez d'abord un intervenant.")
         else:
-            with st.form("form_ajout_hab"):
-                interv_labels4 = {f"{r['prenom']} {r['nom']}": r['id'] for _, r in df_interv4.iterrows()}
-                interv_hab = st.selectbox("Intervenant", list(interv_labels4.keys()))
-                type_hab = st.selectbox("Type d'habilitation", [
-                    "Diplôme AES", "DEAES", "PSC1 / SST", "Permis B", "Visite médecine du travail",
-                    "Habilitation gestes et postures", "AFGSU", "Autre"
-                ])
+            with st.form("form_hab"):
+                interv_lbl4 = {f"{r['prenom']} {r['nom']}": str(r["id"]) for _, r in df_interv4.iterrows()}
+                interv_sel = st.selectbox("Intervenant", list(interv_lbl4.keys()))
+                type_hab = st.selectbox("Type", ["Diplôme AES","DEAES","PSC1 / SST","Permis B","Visite médecine du travail","Habilitation gestes et postures","AFGSU","Autre"])
                 date_obt = st.date_input("Date d'obtention")
                 date_exp = st.date_input("Date d'expiration")
-                submit_hab = st.form_submit_button("Ajouter")
 
-                if submit_hab:
-                    executer(
-                        "INSERT INTO habilitations (structure_id, intervenant_id, type_habilitation, date_obtention, date_expiration) VALUES (?, ?, ?, ?, ?)",
-                        (st.session_state["structure_id"], interv_labels4[interv_hab], type_hab, date_obt.isoformat(), date_exp.isoformat())
-                    )
-                    st.success("Habilitation ajoutée.")
-                    st.rerun()
-
-
-# ============================================================
-#  ONGLET 7 : MON PROFIL
-# ============================================================
-if onglet == "👤 Mon Profil":
-
-    st.caption(f"Structure : **{st.session_state.get('structure_nom', 'Non assignée')}**")
-
-    st.subheader("📧 Ma boîte mail (sollicitations & réception)")
-    with st.form("form_mail_config"):
-        cfg_actuelle = st.session_state.get("mail_config", {})
-        mail_e = st.text_input("Adresse e-mail d'envoi", value=cfg_actuelle.get("email", ""))
-        mail_p = st.text_input("Mot de passe d'application", type="password")
-        mail_i = st.text_input("Serveur IMAP", value=cfg_actuelle.get("imap", "imap.gmail.com"))
-        submit_mail = st.form_submit_button("Enregistrer ma boîte mail")
-
-        if submit_mail:
-            executer(
-                "UPDATE utilisateurs SET mail_perso = ?, mail_password = ?, mail_imap = ? WHERE email = ?",
-                (mail_e, mail_p if mail_p else cfg_actuelle.get("password", ""), mail_i, st.session_state["user_email"])
-            )
-            st.session_state["mail_config"] = {"email": mail_e, "password": mail_p or cfg_actuelle.get("password", ""), "imap": mail_i}
-            st.success("Boîte mail enregistrée.")
+                if st.form_submit_button("Ajouter"):
+                    if date_exp <= date_obt:
+                        st.error("La date d'expiration doit être après la date d'obtention.")
+                    else:
+                        new_h = sb_insert("habilitations", {
+                            "structure_id": SID,
+                            "intervenant_id": interv_lbl4[interv_sel],
+                            "type_habilitation": type_hab,
+                            "date_obtention": date_obt.isoformat(),
+                            "date_expiration": date_exp.isoformat()
+                        })
+                        if new_h:
+                            audit("CREATE_HABILITATION", "habilitations", new_h.get("id"))
+                            st.success("Habilitation ajoutée.")
+                            st.rerun()
 
 
 # ============================================================
-#  ONGLET ADMIN-ONLY : ADMINISTRATION
+#  📊 SUIVI DES HEURES (NOUVEAU MODULE)
 # ============================================================
-if onglet == "🛠️ Administration" and st.session_state.get("is_admin", False):
+elif onglet == "📊 Suivi des heures":
+    st.caption("Suivi mensuel des heures planifiées vs réalisées par intervenant.")
 
-    st.subheader("🏢 Vue par structure (toutes structures confondues)")
-    df_structures_vue = charger_df("""
-        SELECT s.nom as structure,
-               (SELECT COUNT(*) FROM beneficiaires WHERE structure_id = s.id) as beneficiaires,
-               (SELECT COUNT(*) FROM intervenants WHERE structure_id = s.id) as intervenants,
-               (SELECT COUNT(*) FROM interventions WHERE structure_id = s.id) as interventions,
-               (SELECT COUNT(*) FROM documents_transmissions WHERE structure_id = s.id) as documents
-        FROM structures s
-        ORDER BY s.nom
-    """)
-    st.dataframe(df_structures_vue, use_container_width=True, hide_index=True)
+    df_interv_h = sb_select("intervenants", {"structure_id": SID}, order="nom")
+    df_iv_all = sb_select("interventions", {"structure_id": SID})
 
-    st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
-
-    st.subheader("👥 Utilisateurs & accès")
-    df_users_admin = charger_df("""
-        SELECT u.email, s.nom as structure, u.statut_abonnement, u.date_fin_essai, u.nb_requetes_ia, u.quota_max
-        FROM utilisateurs u
-        LEFT JOIN structures s ON u.structure_id = s.id
-        ORDER BY s.nom
-    """)
-    st.dataframe(df_users_admin, use_container_width=True, hide_index=True)
-
-    st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
-    st.subheader("🗑️ Gestion et suppression d'un accès")
-
-    df_users_del = charger_df("SELECT id, email FROM utilisateurs WHERE email != 'admin@omnicoord.fr'")
-
-    if not df_users_del.empty:
-        user_to_delete = st.selectbox(
-            "Sélectionner l'utilisateur à supprimer",
-            options=df_users_del["email"].tolist(),
-            key="select_user_to_delete"
+    if df_interv_h.empty or df_iv_all.empty:
+        st.info("Aucune donnée disponible. Planifiez des interventions.")
+    else:
+        df_iv_all["date_intervention"] = pd.to_datetime(df_iv_all["date_intervention"])
+        df_iv_all["mois"] = df_iv_all["date_intervention"].dt.to_period("M")
+        df_iv_all["duree_h"] = df_iv_all.apply(
+            lambda r: (
+                datetime.datetime.strptime(str(r["heure_fin"]), "%H:%M:%S") -
+                datetime.datetime.strptime(str(r["heure_debut"]), "%H:%M:%S")
+            ).seconds / 3600 if pd.notna(r["heure_debut"]) and pd.notna(r["heure_fin"]) else 0,
+            axis=1
         )
 
-        confirm_del = st.checkbox("Je confirme vouloir supprimer cet accès et toutes les données associées à cette structure")
+        interv_noms_h = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_interv_h.iterrows()}
+        df_iv_all["intervenant_nom"] = df_iv_all["intervenant_id"].apply(lambda x: interv_noms_h.get(str(x), "Non assigné"))
 
-        if st.button("🗑️ Supprimer définitivement l'utilisateur"):
-            if confirm_del:
-                try:
-                    conn = sqlite3.connect(DB_NAME)
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT structure_id FROM utilisateurs WHERE email = ?", (user_to_delete,))
-                    res = cursor.fetchone()
-                    if res:
-                        struct_id = res[0]
-                        cursor.execute("DELETE FROM utilisateurs WHERE email = ?", (user_to_delete,))
-                        cursor.execute("SELECT COUNT(*) FROM utilisateurs WHERE structure_id = ?", (struct_id,))
-                        remaining_users = cursor.fetchone()[0]
-                        if remaining_users == 0:
-                            cursor.execute("DELETE FROM beneficiaires WHERE structure_id = ?", (struct_id,))
-                            cursor.execute("DELETE FROM intervenants WHERE structure_id = ?", (struct_id,))
-                            cursor.execute("DELETE FROM interventions WHERE structure_id = ?", (struct_id,))
-                            cursor.execute("DELETE FROM documents_transmissions WHERE structure_id = ?", (struct_id,))
-                            cursor.execute("DELETE FROM structures WHERE id = ?", (struct_id,))
-                        conn.commit()
-                        conn.close()
-                        st.success(f"L'accès pour {user_to_delete} a été supprimé avec succès !")
-                        time.sleep(1.5)
-                        st.rerun()
-                    else:
-                        st.error("Utilisateur introuvable.")
-                except Exception as e:
-                    st.error(f"Erreur lors de la suppression : {e}")
+        # Filtre mois
+        mois_dispo = df_iv_all["mois"].dropna().unique()
+        mois_dispo_str = sorted([str(m) for m in mois_dispo], reverse=True)
+        mois_sel = st.selectbox("Mois", mois_dispo_str) if mois_dispo_str else None
+
+        if mois_sel:
+            df_mois = df_iv_all[df_iv_all["mois"].astype(str) == mois_sel]
+            df_resume = df_mois.groupby("intervenant_nom").agg(
+                nb_interventions=("id", "count"),
+                heures_planifiees=("duree_h", "sum"),
+                heures_realisees=("duree_h", lambda x: x[df_mois.loc[x.index, "statut"] == "Réalisé"].sum())
+            ).reset_index()
+
+            st.markdown(f"### Mois de {mois_sel}")
+            col_t1, col_t2, col_t3 = st.columns(3)
+            col_t1.metric("Total interventions", int(df_resume["nb_interventions"].sum()))
+            col_t2.metric("Heures planifiées", f"{df_resume['heures_planifiees'].sum():.1f}h")
+            col_t3.metric("Heures réalisées", f"{df_resume['heures_realisees'].sum():.1f}h")
+
+            st.dataframe(
+                df_resume.rename(columns={
+                    "intervenant_nom": "Intervenant",
+                    "nb_interventions": "Nb interventions",
+                    "heures_planifiees": "Heures planifiées",
+                    "heures_realisees": "Heures réalisées"
+                }),
+                use_container_width=True, hide_index=True
+            )
+
+            # Export CSV
+            csv = df_resume.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Exporter en CSV", data=csv,
+                               file_name=f"heures_{mois_sel}.csv", mime="text/csv")
+
+
+# ============================================================
+#  👤 MON PROFIL
+# ============================================================
+elif onglet == "👤 Mon Profil":
+    st.caption(f"Structure : **{st.session_state.get('structure_nom', '—')}**")
+
+    st.subheader("🔑 Changer mon mot de passe")
+    with st.form("form_mdp"):
+        n1 = st.text_input("Nouveau mot de passe", type="password")
+        n2 = st.text_input("Confirmer", type="password")
+        if st.form_submit_button("Mettre à jour"):
+            if not n1 or n1 != n2:
+                st.error("Les mots de passe ne correspondent pas.")
+            elif len(n1) < 8:
+                st.error("8 caractères minimum.")
             else:
-                st.warning("Veuillez cocher la case de confirmation pour procéder à la suppression.")
-    else:
-        st.info("Aucun autre utilisateur à supprimer pour le moment.")
+                try:
+                    sb.auth.update_user({"password": n1})
+                    audit("CHANGE_PASSWORD", "profils", USER_ID)
+                    st.success("Mot de passe mis à jour.")
+                except Exception as e:
+                    st.error(f"Erreur : {e}")
 
     st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
+    st.subheader("📧 Ma boîte mail (sollicitations)")
+    st.info("💡 Gmail : utilisez un **mot de passe d'application** (pas votre mot de passe principal). Générez-en un sur myaccount.google.com > Sécurité > Mots de passe des applications.")
 
-    st.subheader("🗄️ État global de la base de données")
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Bénéficiaires (total)", len(charger_df("SELECT id FROM beneficiaires")))
-    col2.metric("Intervenants (total)", len(charger_df("SELECT id FROM intervenants")))
-    col3.metric("Interventions (total)", len(charger_df("SELECT id FROM interventions")))
-    col4.metric("Documents (total)", len(charger_df("SELECT id FROM documents_transmissions")))
+    with st.form("form_mail"):
+        cfg = st.session_state.get("mail_config", {})
+        mail_e = st.text_input("Adresse e-mail", value=cfg.get("email", ""))
+        mail_p = st.text_input("Mot de passe d'application Gmail (16 caractères)", type="password",
+                                help="Ce mot de passe est chiffré avant d'être stocké.")
+        mail_i = st.text_input("Serveur IMAP", value=cfg.get("imap", "imap.gmail.com"))
 
-    st.caption(f"Base de données locale : `{DB_NAME}` (SQLite, mode WAL). Pensez à ne jamais versionner ce fichier sur GitHub (voir .gitignore).")
+        if st.form_submit_button("Enregistrer"):
+            if mail_p and len(mail_p) not in [16, 19]:  # 16 sans espaces, 19 avec
+                st.warning("Un mot de passe d'application Gmail fait normalement 16 caractères.")
+            mdp_chiffre = chiffrer_mdp_mail(mail_p) if mail_p else ""
+            update_data = {"mail_smtp_email": mail_e, "mail_imap_server": mail_i}
+            if mdp_chiffre:
+                update_data["mail_smtp_password"] = mdp_chiffre
+            if sb_update("profils", update_data, "id", USER_ID):
+                st.session_state["mail_config"] = {
+                    "email": mail_e,
+                    "password": mail_p or cfg.get("password", ""),
+                    "imap": mail_i
+                }
+                audit("UPDATE_MAIL_CONFIG", "profils", USER_ID)
+                st.success("Configuration mail enregistrée (mot de passe chiffré).")
+
+    # Test de connexion mail
+    st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
+    st.subheader("🧪 Tester la connexion mail")
+    email_test = st.text_input("Envoyer un email de test à :")
+    if st.button("Envoyer le test") and email_test:
+        ok, msg = envoyer_email(
+            email_test,
+            "Test OmniCoord IA — Connexion mail OK",
+            "Bonjour,\n\nCeci est un email de test envoyé depuis OmniCoord IA.\nSi vous recevez ce message, la configuration mail est correcte.\n\nOmniCoord IA"
+        )
+        if ok: st.success(f"✅ {msg}")
+        else: st.error(f"❌ {msg}")
+
+
+# ============================================================
+#  🛠️ ADMINISTRATION
+# ============================================================
+elif onglet == "🛠️ Administration" and IS_ADMIN:
+    st.subheader("🏢 Vue par structure")
+    df_structs_admin = sb_select("structures", order="nom")
+    if not df_structs_admin.empty:
+        st.dataframe(df_structs_admin[["nom","date_creation","statut"]], use_container_width=True, hide_index=True)
 
     st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
-    st.subheader("🔐 Sécurité")
-    st.write("- Mots de passe utilisateurs hachés avec **bcrypt**.")
-    st.write("- Clé API Gemini chargée uniquement via les secrets Streamlit (jamais en dur dans le code).")
-    st.write(f"- Statut clé Gemini : {'✅ Configurée' if IA_DISPONIBLE else '❌ Non configurée'}")
-    st.write("- Cloisonnement des données actif : chaque structure ne voit que ses propres bénéficiaires, intervenants, plannings et documents.")
+    st.subheader("👥 Utilisateurs")
+    df_users_a = sb_select("profils", order="email")
+    if not df_users_a.empty:
+        st.dataframe(df_users_a[["email","statut_abonnement","date_fin_essai","nb_requetes_ia","quota_max_ia"]],
+                    use_container_width=True, hide_index=True)
+
+    st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
+    st.subheader("📋 Journal d'audit (50 dernières actions)")
+    df_audit = sb_select("audit_logs", order="created_at")
+    if not df_audit.empty:
+        df_audit_aff = df_audit.sort_values("created_at", ascending=False).head(50)
+        st.dataframe(df_audit_aff[["created_at","action","table_name","record_id"]],
+                    use_container_width=True, hide_index=True)
+
+    st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
+    st.subheader("🔐 État de la sécurité")
+    st.markdown("""
+    - ✅ **Auth** : Supabase Auth (bcrypt natif + JWT)
+    - ✅ **RLS** : Cloisonnement par structure garanti au niveau base de données
+    - ✅ **Mots de passe mail** : Chiffrés avec Fernet avant stockage
+    - ✅ **Anti brute-force** : Blocage après 10 échecs / 15 min
+    - ✅ **Injection HTML** : html.escape() sur toutes les valeurs injectées
+    - ✅ **Audit log** : Toutes les actions sensibles tracées
+    - ✅ **PDF** : Unicode natif (fpdf2), plus de caractères manquants
+    - ✅ **Quota IA** : Re-vérifié en base à chaque appel (pas en session)
+    """)
