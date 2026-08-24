@@ -17,6 +17,10 @@ class AuthorizationError(OmniCoordError):
     """Action interdite pour l'utilisateur courant."""
 
 
+class ValidationError(OmniCoordError):
+    """Donnée ou règle métier invalide."""
+
+
 class AIServiceError(OmniCoordError):
     """Erreur du fournisseur IA ou de parsing de sa réponse."""
 
