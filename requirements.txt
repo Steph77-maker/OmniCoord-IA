@@ -1,8 +1,6 @@
-streamlit
-pandas
-google-generativeai
-pypdf
-fpdf2
-reportlab
-bcrypt
-cryptography
+streamlit>=1.35.0
+supabase>=2.4.0
+google-generativeai>=0.7.0
+fpdf2>=2.7.9
+pandas>=2.0.0
+cryptography>=42.0.0
