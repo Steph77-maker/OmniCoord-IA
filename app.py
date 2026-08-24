@@ -615,6 +615,104 @@ def appel_ia(prompt: str) -> dict | None:
 
 
 # ============================================================
+#  GÉNÉRATION PDF — RAPPORT DE MATCHING IA
+# ============================================================
+def _generer_pdf_matching(intervenant_nom, intervenant_statut, intervenant_zone,
+                           beneficiaire_nom, score_global, profil_humain,
+                           traits_dominants, dimensions, scores,
+                           competences_transferables, alerte_habilitation,
+                           alerte_humaine, justification) -> bytes:
+    """Génère un rapport PDF complet du matching IA pour un intervenant."""
+    pdf = PDFDocument()
+    pdf.add_page()
+
+    # ── En-tête du rapport ──
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.set_text_color(15, 41, 66)
+    pdf.cell(0, 8, f"Rapport de matching IA — {datetime.date.today().strftime('%d/%m/%Y')}", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(2)
+
+    # ── Score global ──
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.set_text_color(47, 124, 246)
+    pdf.cell(0, 7, f"Score global : {score_global}%", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_text_color(20, 20, 20)
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 6, f"Bénéficiaire : {beneficiaire_nom}", new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(0, 6, f"Intervenant  : {intervenant_nom} ({intervenant_statut}) — {intervenant_zone}", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
+
+    # ── Profil humain ──
+    if profil_humain:
+        pdf.set_font("Helvetica", "I", 10)
+        pdf.set_text_color(80, 80, 80)
+        pdf.multi_cell(0, 6, f"Profil humain : {profil_humain}")
+        pdf.ln(3)
+
+    # ── Traits de personnalité ──
+    if traits_dominants:
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.set_text_color(20, 20, 20)
+        pdf.cell(0, 7, "Empreinte comportementale", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "", 10)
+        for trait in traits_dominants:
+            pdf.cell(0, 6, f"  • {trait}", new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(3)
+
+    # ── Scores par dimension ──
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.set_text_color(20, 20, 20)
+    pdf.cell(0, 7, "Évaluation par dimension", new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 10)
+    for cle, label, _ in dimensions:
+        val = int(scores.get(cle, 0))
+        barre = "█" * round(val / 10) + "░" * (10 - round(val / 10))
+        pdf.cell(0, 6, f"  {label.replace('🛠️','').replace('🎓','').replace('❤️','').replace('🧠','').replace('📍','').strip()} : {val}%  {barre}", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
+
+    # ── Compétences transférables ──
+    if competences_transferables:
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.set_text_color(20, 20, 20)
+        pdf.cell(0, 7, "Compétences transférables", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "", 10)
+        for ct in competences_transferables:
+            pdf.multi_cell(0, 6, f"  ✦ {ct}")
+        pdf.ln(3)
+
+    # ── Alertes ──
+    if alerte_habilitation:
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.set_text_color(224, 85, 79)
+        pdf.multi_cell(0, 6, f"⚠ Habilitation : {alerte_habilitation}")
+        pdf.set_text_color(20, 20, 20)
+        pdf.ln(2)
+    if alerte_humaine:
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.set_text_color(217, 154, 61)
+        pdf.multi_cell(0, 6, f"💡 Profil bénéficiaire : {alerte_humaine}")
+        pdf.set_text_color(20, 20, 20)
+        pdf.ln(2)
+
+    # ── Synthèse narrative ──
+    if justification:
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.set_text_color(20, 20, 20)
+        pdf.cell(0, 7, "Synthèse de l'analyse", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "", 10)
+        pdf.multi_cell(0, 6, justification)
+
+    # ── Mention légale ──
+    pdf.ln(8)
+    pdf.set_font("Helvetica", "I", 8)
+    pdf.set_text_color(137, 150, 163)
+    pdf.multi_cell(0, 5, "Ce rapport est généré automatiquement par l'IA d'OmniCoord IA. "
+                         "Il constitue une aide à la décision et ne se substitue pas au jugement du coordinateur.")
+
+    return bytes(pdf.output())
+
+
+# ============================================================
 #  CALCUL DE PROXIMITÉ
 # ============================================================
 def distance_km(lat1, lon1, lat2, lon2) -> float | None:
@@ -1001,6 +1099,18 @@ elif onglet == "🧑‍🤝‍🧑 Vivier & Sourcing":
                 disponibilites = st.text_input("Disponibilités")
                 source = st.selectbox("Source", ["Vivier interne","CVthèque","Annonce","Réseau / cooptation","Candidature spontanée"])
 
+            # Champ soft skills / personnalité — utilisé par le matching IA
+            st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
+            st.markdown("**🧠 Personnalité & savoir-être** *(observations du coordinateur — enrichit l'analyse IA)*")
+            soft_skills = st.text_area(
+                "Observations personnalité / soft skills",
+                placeholder="Ex : très à l'aise avec les personnes atteintes d'Alzheimer, grande patience, "
+                            "bénévolat auprès de personnes âgées, calme en situation de stress, "
+                            "très empathique, bonne communication avec les familles...",
+                height=100,
+                help="Ces observations sont analysées par l'IA lors du matching pour évaluer l'adéquation humaine avec le bénéficiaire."
+            )
+
             if st.form_submit_button("Ajouter au vivier") and nom and prenom:
                 new_row = sb_insert("intervenants", {
                     "structure_id": SID, "nom": nom.strip(), "prenom": prenom.strip(),
@@ -1008,7 +1118,11 @@ elif onglet == "🧑‍🤝‍🧑 Vivier & Sourcing":
                     "competences": competences, "experience_texte": experience_texte,
                     "zone_geo": zone_geo, "disponibilites": disponibilites,
                     "statut_dispo": "Disponible", "source": source,
-                    "date_ajout": datetime.date.today().isoformat()
+                    "date_ajout": datetime.date.today().isoformat(),
+                    "disponibilites": disponibilites,
+                    # Stocké dans experience_texte enrichi si pas de colonne dédiée
+                    # On préfixe pour que l'IA puisse le distinguer
+                    "experience_texte": f"{experience_texte}\n\n[SOFT SKILLS / PERSONNALITÉ] : {soft_skills}" if soft_skills else experience_texte,
                 })
                 if new_row:
                     audit("CREATE_INTERVENANT", "intervenants", new_row.get("id"))
@@ -1067,57 +1181,264 @@ elif onglet == "🎯 Matching IA":
                 df_habs = sb_select("habilitations", {"intervenant_id": str(interv["id"]), "structure_id": SID})
                 habs_txt = "; ".join([f"{r['type_habilitation']} (exp. {r['date_expiration']})" for _, r in df_habs.iterrows()]) or "Aucune"
 
+                # Extraction des soft skills si préfixés dans experience_texte
+                exp_txt = interv.get("experience_texte", "") or ""
+                soft_skills_txt = ""
+                if "[SOFT SKILLS / PERSONNALITÉ]" in exp_txt:
+                    parties = exp_txt.split("[SOFT SKILLS / PERSONNALITÉ]")
+                    exp_txt_clean = parties[0].strip()
+                    soft_skills_txt = parties[1].replace(":", "", 1).strip() if len(parties) > 1 else ""
+                else:
+                    exp_txt_clean = exp_txt
+
                 prompt = f"""
-                Tu es coordinateur SAAD/SSIAD. Évalue l'adéquation entre ce bénéficiaire et cet intervenant.
-                Réponds UNIQUEMENT en JSON avec :
-                - score_competences (0-100)
-                - score_habilitations (0-100)
-                - score_global (0-100)
-                - competences_transferables (liste de chaînes)
-                - alerte_habilitation (texte ou "")
-                - justification (2-3 lignes)
+Tu es un coordinateur expert en aide à domicile (SAAD/SSIAD) et psychologue du travail.
+Tu dois évaluer l'adéquation GLOBALE entre un bénéficiaire et un intervenant, en combinant :
+- Les compétences techniques et habilitations
+- Le profil humain, l'empathie et les soft skills — CRITIQUES dans le médico-social
 
-                BESOIN BÉNÉFICIAIRE :
-                Besoins : {benef_row.get('besoins_recurrents','')} | Gestes : {benef_row.get('gestes_techniques','')}
-                Horaires : {benef_row.get('besoins_horaires','')} | GIR : {benef_row.get('niveau_dependance','')}
+RÈGLES ABSOLUES :
+1. Ne jamais inventer une information absente des données fournies.
+2. Formuler toute hypothèse comportementale avec prudence ("semble", "laisse supposer").
+3. Signaler explicitement si des données sont manquantes plutôt que de compléter.
+4. Dans le médico-social, l'empathie et la bienveillance ont autant de poids que les compétences techniques.
 
-                PROFIL INTERVENANT :
-                Compétences : {interv['competences']} | Parcours : {interv['experience_texte']}
-                Habilitations : {habs_txt} | Zone : {interv['zone_geo']} | Dispo : {interv['disponibilites']}
+═══════════════════════════════════════════════
+PROFIL BÉNÉFICIAIRE
+═══════════════════════════════════════════════
+Niveau de dépendance (GIR) : {benef_row.get('niveau_dependance', 'Non renseigné')}
+Pathologies / besoins spécifiques : {benef_row.get('pathologies', 'Non renseigné')}
+Gestes techniques requis : {benef_row.get('gestes_techniques', 'Non renseigné')}
+Besoins récurrents : {benef_row.get('besoins_recurrents', 'Non renseigné')}
+Horaires souhaités : {benef_row.get('besoins_horaires', 'Non renseigné')}
+Notes coordinateur : {benef_row.get('notes', 'Aucune')}
+
+═══════════════════════════════════════════════
+PROFIL INTERVENANT
+═══════════════════════════════════════════════
+Compétences techniques déclarées : {interv.get('competences', 'Non renseigné')}
+Parcours professionnel : {exp_txt_clean or 'Non renseigné'}
+Observations personnalité / soft skills (coordinateur) : {soft_skills_txt or 'Non renseignées'}
+Habilitations valides : {habs_txt}
+Zone géographique : {interv.get('zone_geo', 'Non renseignée')}
+Disponibilités déclarées : {interv.get('disponibilites', 'Non renseignées')}
+
+═══════════════════════════════════════════════
+ANALYSE DEMANDÉE — 5 DIMENSIONS
+═══════════════════════════════════════════════
+
+DIMENSION 1 — COMPÉTENCES TECHNIQUES (score_competences 0-100)
+Évalue si les compétences et gestes techniques de l'intervenant couvrent les besoins du bénéficiaire.
+Identifie les compétences transférables issues d'autres expériences.
+
+DIMENSION 2 — HABILITATIONS (score_habilitations 0-100)
+Vérifie si les certifications sont à jour et adaptées au profil du bénéficiaire.
+Signale toute habilitation manquante obligatoire.
+
+DIMENSION 3 — EMPATHIE & BIENVEILLANCE (score_empathie 0-100)
+À partir du parcours, des loisirs/engagements mentionnés, et des observations soft skills :
+- Identifie les signaux d'empathie (bénévolat, secteurs d'aide, formulations utilisées)
+- Évalue la capacité à accompagner avec douceur et bienveillance
+- Signale si le profil de dépendance du bénéficiaire (Alzheimer, fin de vie, GIR 1-2) exige des qualités particulières non visibles dans le profil
+
+DIMENSION 4 — SOFT SKILLS & PERSONNALITÉ (score_soft_skills 0-100)
+- Patience, écoute active, gestion du stress, communication avec les familles
+- Stabilité émotionnelle, adaptabilité, discrétion
+- Déduit depuis le parcours ET les observations du coordinateur
+
+DIMENSION 5 — COMPATIBILITÉ PRATIQUE (score_compatibilite 0-100)
+- Adéquation zone géographique / secteur bénéficiaire
+- Compatibilité des disponibilités avec les horaires requis
+
+═══════════════════════════════════════════════
+FORMAT DE RÉPONSE — JSON STRICT
+═══════════════════════════════════════════════
+Réponds UNIQUEMENT avec ce JSON (pas de markdown, pas de texte autour) :
+{{
+  "score_competences": <0-100>,
+  "score_habilitations": <0-100>,
+  "score_empathie": <0-100>,
+  "score_soft_skills": <0-100>,
+  "score_compatibilite": <0-100>,
+  "score_global": <moyenne pondérée : compétences×25% + habilitations×20% + empathie×25% + soft_skills×20% + compatibilite×10%>,
+  "profil_humain": "<une phrase qui décrit le profil relationnel de l'intervenant>",
+  "traits_dominants": ["<trait 1>", "<trait 2>", "<trait 3>"],
+  "competences_transferables": ["<compétence — source — transfert>"],
+  "alerte_habilitation": "<texte si habilitation manquante, sinon vide>",
+  "alerte_humaine": "<texte si le profil bénéficiaire exige des qualités particulières non visibles, sinon vide>",
+  "justification": "<synthèse narrative de 3-5 lignes, humaine et sourcée>"
+}}
                 """
                 data = appel_ia(prompt)
                 if data:
                     data["intervenant_nom"] = f"{interv['prenom']} {interv['nom']}"
-                    data["intervenant_statut"] = interv["type_statut"]
+                    data["intervenant_statut"] = interv.get("type_statut", "")
+                    data["intervenant_zone"] = interv.get("zone_geo", "")
+                    data["intervenant_dispo"] = interv.get("disponibilites", "")
                     resultats.append(data)
                 barre.progress((idx + 1) / total)
 
-            st.session_state["resultats_matching"] = sorted(resultats, key=lambda x: int(x.get("score_global", 0)), reverse=True)
+            st.session_state["resultats_matching"] = sorted(
+                resultats, key=lambda x: int(x.get("score_global", 0)), reverse=True
+            )
+            st.session_state["benef_matching_label"] = benef_choisi_label
 
+        # ── Affichage des résultats ────────────────────────────────────────────
         if st.session_state.get("resultats_matching"):
-            st.markdown("### 📊 Résultats")
-            for res in st.session_state["resultats_matching"]:
+            st.markdown("### 📊 Résultats du matching")
+
+            DIMENSIONS = [
+                ("score_competences",  "🛠️ Compétences techniques", "#2f7cf6"),
+                ("score_habilitations","🎓 Habilitations",          "#7c3aed"),
+                ("score_empathie",     "❤️ Empathie & bienveillance","#e0554f"),
+                ("score_soft_skills",  "🧠 Soft skills",             "#d99a3d"),
+                ("score_compatibilite","📍 Compatibilité pratique",  "#3fae74"),
+            ]
+
+            for rang, res in enumerate(st.session_state["resultats_matching"], 1):
                 score = int(res.get("score_global", 0))
-                coul = "#3fae74" if score >= 70 else ("#d99a3d" if score >= 40 else "#e0554f")
+                coul_score = "#3fae74" if score >= 70 else ("#d99a3d" if score >= 45 else "#e0554f")
+                nom_interv = h(res.get("intervenant_nom", ""))
+                statut_interv = h(res.get("intervenant_statut", ""))
+                rangs_emoji = {1: "🥇", 2: "🥈", 3: "🥉"}
+                rang_label = rangs_emoji.get(rang, f"#{rang}")
+
+                # Carte de résumé
                 st.markdown(f"""
-                    <div class="oc-card" style="border-left-color:{coul};">
-                        <div style="display:flex; justify-content:space-between;">
-                            <span style="font-size:17px; font-weight:700;">{h(res.get('intervenant_nom',''))}</span>
-                            <span class="oc-badge" style="background:{coul};">{score}%</span>
+                    <div class="oc-card" style="border-left-color:{coul_score};">
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <div>
+                                <span style="font-size:18px; font-weight:800;">{rang_label} {nom_interv}</span>
+                                <span style="color:#8996a3; font-size:13px; margin-left:10px;">{statut_interv}</span>
+                            </div>
+                            <span class="oc-badge" style="background:{coul_score}; font-size:16px;">{score}%</span>
+                        </div>
+                        <div style="color:#b8c2cc; font-size:13px; margin-top:6px; font-style:italic;">
+                            {h(res.get('profil_humain', ''))}
                         </div>
                     </div>
                 """, unsafe_allow_html=True)
+
+                # Alertes
                 if res.get("alerte_habilitation"):
-                    st.warning(f"⚠️ {res['alerte_habilitation']}")
-                with st.expander("Détails"):
-                    c1, c2 = st.columns(2)
-                    c1.caption("Compétences"); c1.progress(min(1.0, int(res.get("score_competences", 0))/100))
-                    c2.caption("Habilitations"); c2.progress(min(1.0, int(res.get("score_habilitations", 0))/100))
+                    st.warning(f"⚠️ Habilitation : {res['alerte_habilitation']}")
+                if res.get("alerte_humaine"):
+                    st.info(f"💡 Profil bénéficiaire : {res['alerte_humaine']}")
+
+                with st.expander(f"📋 Analyse détaillée — {nom_interv}"):
+
+                    # ── Traits de personnalité (style OmniRecrut) ──
+                    traits = res.get("traits_dominants", [])
+                    if traits:
+                        st.markdown("#### 🧠 Empreinte comportementale")
+                        couleurs_traits = ["#2563eb", "#7c3aed", "#e0554f", "#d99a3d", "#3fae74"]
+                        nb = min(len(traits), 5)
+                        cols_traits = st.columns(nb)
+                        for i, trait in enumerate(traits[:nb]):
+                            lettre = str(trait).strip()[0].upper() if str(trait).strip() else "?"
+                            mot_court = str(trait).strip().split()[0][:10]
+                            with cols_traits[i]:
+                                st.markdown(f"""
+                                    <div style="text-align:center; background:#1e293b; border-radius:12px;
+                                                padding:14px 8px; border:2px solid {couleurs_traits[i % len(couleurs_traits)]};">
+                                        <div style="font-size:26px; font-weight:800;
+                                                    color:{couleurs_traits[i % len(couleurs_traits)]};">{h(lettre)}</div>
+                                        <div style="font-size:11px; color:#94a3b8;
+                                                    margin-top:4px; font-weight:600;">{h(mot_court)}</div>
+                                    </div>
+                                """, unsafe_allow_html=True)
+                        st.markdown("")
+                        for trait in traits:
+                            st.markdown(f"""
+                                <div style="background:#1e293b; border-left:3px solid #2563eb;
+                                            border-radius:6px; padding:10px 14px; margin-bottom:6px;
+                                            color:#cbd5e1; font-size:13px;">🔹 {h(str(trait))}</div>
+                            """, unsafe_allow_html=True)
+                        st.markdown("---")
+
+                    # ── Scores par dimension (pastilles style OmniRecrut) ──
+                    st.markdown("#### 📊 Évaluation par dimension")
+                    for i in range(0, len(DIMENSIONS), 2):
+                        paire = DIMENSIONS[i:i+2]
+                        cols_dim = st.columns(len(paire))
+                        for col_d, (cle, label, couleur) in zip(cols_dim, paire):
+                            val = int(res.get(cle, 0))
+                            nb_pleines = round(val / 20)  # 5 pastilles max
+                            pastilles = "".join([
+                                f'<span style="display:inline-block; width:16px; height:16px; '
+                                f'border-radius:50%; margin-right:5px; '
+                                f'background:{couleur if j < nb_pleines else "#334155"};"></span>'
+                                for j in range(5)
+                            ])
+                            with col_d:
+                                st.markdown(f"""
+                                    <div style="background:#1e293b; border-radius:10px; padding:14px 16px;
+                                                border-left:4px solid {couleur}; margin-bottom:10px; min-height:100px;">
+                                        <div style="font-size:12px; color:#94a3b8; font-weight:600;
+                                                    text-transform:uppercase; letter-spacing:0.05em; margin-bottom:8px;">
+                                            {h(label)}
+                                        </div>
+                                        <div style="font-size:22px; font-weight:800; color:{couleur}; margin-bottom:8px;">
+                                            {val}%
+                                        </div>
+                                        <div>{pastilles}</div>
+                                    </div>
+                                """, unsafe_allow_html=True)
+                    st.markdown("---")
+
+                    # ── Compétences transférables ──
                     transf = res.get("competences_transferables", [])
                     if transf:
-                        st.markdown("**🌱 Compétences transférables**")
-                        for t in transf: st.markdown(f"- {h(str(t))}")
-                    st.write(res.get("justification", ""))
+                        st.markdown("#### 🌱 Compétences transférables détectées")
+                        for t in transf:
+                            st.markdown(f"""
+                                <div style="background:#1e293b; border-left:3px solid #3fae74;
+                                            border-radius:6px; padding:8px 12px; margin-bottom:5px;
+                                            color:#86efac; font-size:12px;">✦ {h(str(t))}</div>
+                            """, unsafe_allow_html=True)
+                        st.markdown("---")
+
+                    # ── Synthèse narrative ──
+                    justif = res.get("justification", "")
+                    if justif:
+                        st.markdown("#### 📄 Synthèse de l'analyse")
+                        st.markdown(f"""
+                            <div style="background:#1a202c; padding:18px; border-radius:8px;
+                                        color:#e2e8f0; white-space:pre-wrap; line-height:1.7;
+                                        font-size:13px; border:1px solid rgba(47,124,246,0.3);">
+                                {h(justif)}
+                            </div>
+                        """, unsafe_allow_html=True)
+
+                    # ── Export PDF du rapport ──
+                    st.markdown("---")
+                    benef_label_pdf = st.session_state.get("benef_matching_label", "Bénéficiaire")
+                    try:
+                        pdf_rapport = _generer_pdf_matching(
+                            intervenant_nom=res.get("intervenant_nom", ""),
+                            intervenant_statut=res.get("intervenant_statut", ""),
+                            intervenant_zone=res.get("intervenant_zone", ""),
+                            beneficiaire_nom=benef_label_pdf,
+                            score_global=score,
+                            profil_humain=res.get("profil_humain", ""),
+                            traits_dominants=res.get("traits_dominants", []),
+                            dimensions=DIMENSIONS,
+                            scores=res,
+                            competences_transferables=res.get("competences_transferables", []),
+                            alerte_habilitation=res.get("alerte_habilitation", ""),
+                            alerte_humaine=res.get("alerte_humaine", ""),
+                            justification=res.get("justification", "")
+                        )
+                        st.download_button(
+                            label="⬇️ Télécharger le rapport PDF",
+                            data=pdf_rapport,
+                            file_name=f"matching_{res.get('intervenant_nom','').replace(' ','_')}_{benef_label_pdf.replace(' ','_')}.pdf",
+                            mime="application/pdf",
+                            key=f"pdf_matching_{rang}"
+                        )
+                    except Exception as e_pdf:
+                        logger.error(f"PDF matching: {e_pdf}")
+                        st.caption("Export PDF indisponible.")
 
 
 # ============================================================
