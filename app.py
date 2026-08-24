@@ -792,23 +792,29 @@ st.sidebar.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=Tr
 
 
 # ============================================================
-#  MENU PRINCIPAL
+#  MENU PRINCIPAL — Différent selon admin / client
 # ============================================================
 st.sidebar.markdown("### 📋 Menu")
 
-_onglets = [
-    "🏠 Tableau de bord",
-    "🧑‍🤝‍🧑 Vivier & Sourcing",
-    "🎯 Matching IA",
-    "❤️ Bénéficiaires",
-    "📝 Documents & Transmissions",
-    "📅 Plannings & Urgences",
-    "✅ Conformité & Habilitations",
-    "📊 Suivi des heures",
-    "👤 Mon Profil",
-]
 if IS_ADMIN:
-    _onglets.append("🛠️ Administration")
+    # L'admin = éditeur SaaS. Il ne gère que les accès clients.
+    _onglets = [
+        "🛠️ Administration",
+        "👤 Mon Profil",
+    ]
+else:
+    # Le client = SAAD/SSIAD. Il utilise l'outil au quotidien.
+    _onglets = [
+        "🏠 Tableau de bord",
+        "🧑‍🤝‍🧑 Vivier & Sourcing",
+        "🎯 Matching IA",
+        "❤️ Bénéficiaires",
+        "📝 Documents & Transmissions",
+        "📅 Plannings & Urgences",
+        "✅ Conformité & Habilitations",
+        "📊 Suivi des heures",
+        "👤 Mon Profil",
+    ]
 
 onglet = st.sidebar.radio("Navigation", _onglets, label_visibility="collapsed")
 
@@ -1683,102 +1689,456 @@ elif onglet == "📊 Suivi des heures":
 
 
 # ============================================================
-#  👤 MON PROFIL
+#  👤 MON PROFIL — Version admin / version client
 # ============================================================
 elif onglet == "👤 Mon Profil":
-    st.caption(f"Structure : **{st.session_state.get('structure_nom', '—')}**")
 
-    st.subheader("🔑 Changer mon mot de passe")
-    with st.form("form_mdp"):
-        n1 = st.text_input("Nouveau mot de passe", type="password")
-        n2 = st.text_input("Confirmer", type="password")
-        if st.form_submit_button("Mettre à jour"):
-            if not n1 or n1 != n2:
-                st.error("Les mots de passe ne correspondent pas.")
-            elif len(n1) < 8:
-                st.error("8 caractères minimum.")
-            else:
-                try:
-                    sb.auth.update_user({"password": n1})
-                    audit("CHANGE_PASSWORD", "profils", USER_ID)
-                    st.success("Mot de passe mis à jour.")
-                except Exception as e:
-                    st.error(f"Erreur : {e}")
+    if IS_ADMIN:
+        # -------------------------------------------------------
+        #  PROFIL ADMIN = Éditeur SaaS
+        #  Il configure uniquement sa boîte mail pour envoyer
+        #  les identifiants à ses clients.
+        # -------------------------------------------------------
+        st.caption("👑 Compte administrateur OmniCoord IA — Éditeur SaaS")
 
-    st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
-    st.subheader("📧 Ma boîte mail (sollicitations)")
-    st.info("💡 Gmail : utilisez un **mot de passe d'application** (pas votre mot de passe principal). Générez-en un sur myaccount.google.com > Sécurité > Mots de passe des applications.")
+        st.subheader("🔑 Changer mon mot de passe admin")
+        with st.form("form_mdp_admin"):
+            n1 = st.text_input("Nouveau mot de passe", type="password")
+            n2 = st.text_input("Confirmer", type="password")
+            if st.form_submit_button("Mettre à jour"):
+                if not n1 or n1 != n2:
+                    st.error("Les mots de passe ne correspondent pas.")
+                elif len(n1) < 8:
+                    st.error("8 caractères minimum.")
+                else:
+                    try:
+                        sb.auth.update_user({"password": n1})
+                        audit("CHANGE_PASSWORD", "profils", USER_ID)
+                        st.success("Mot de passe mis à jour.")
+                    except Exception as e:
+                        st.error(f"Erreur : {e}")
 
-    with st.form("form_mail"):
-        cfg = st.session_state.get("mail_config", {})
-        mail_e = st.text_input("Adresse e-mail", value=cfg.get("email", ""))
-        mail_p = st.text_input("Mot de passe d'application Gmail (16 caractères)", type="password",
-                                help="Ce mot de passe est chiffré avant d'être stocké.")
-        mail_i = st.text_input("Serveur IMAP", value=cfg.get("imap", "imap.gmail.com"))
+        st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
+        st.subheader("📧 Ma boîte mail (envoi des accès clients)")
+        st.info("💡 Cette boîte sert à envoyer automatiquement les identifiants à vos nouveaux clients. Utilisez un **mot de passe d'application Gmail** (pas votre mot de passe personnel). Générez-en un sur myaccount.google.com > Sécurité > Mots de passe des applications.")
 
-        if st.form_submit_button("Enregistrer"):
-            if mail_p and len(mail_p) not in [16, 19]:  # 16 sans espaces, 19 avec
-                st.warning("Un mot de passe d'application Gmail fait normalement 16 caractères.")
-            mdp_chiffre = chiffrer_mdp_mail(mail_p) if mail_p else ""
-            update_data = {"mail_smtp_email": mail_e, "mail_imap_server": mail_i}
-            if mdp_chiffre:
-                update_data["mail_smtp_password"] = mdp_chiffre
-            if sb_update("profils", update_data, "id", USER_ID):
-                st.session_state["mail_config"] = {
-                    "email": mail_e,
-                    "password": mail_p or cfg.get("password", ""),
-                    "imap": mail_i
-                }
-                audit("UPDATE_MAIL_CONFIG", "profils", USER_ID)
-                st.success("Configuration mail enregistrée (mot de passe chiffré).")
+        with st.form("form_mail_admin"):
+            cfg = st.session_state.get("mail_config", {})
+            mail_e = st.text_input("Adresse e-mail d'envoi", value=cfg.get("email", ""))
+            mail_p = st.text_input("Mot de passe d'application Gmail (16 caractères)", type="password",
+                                    help="Chiffré avec Fernet avant stockage en base.")
+            mail_i = st.text_input("Serveur IMAP", value=cfg.get("imap", "imap.gmail.com"))
 
-    # Test de connexion mail
-    st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
-    st.subheader("🧪 Tester la connexion mail")
-    email_test = st.text_input("Envoyer un email de test à :")
-    if st.button("Envoyer le test") and email_test:
-        ok, msg = envoyer_email(
-            email_test,
-            "Test OmniCoord IA — Connexion mail OK",
-            "Bonjour,\n\nCeci est un email de test envoyé depuis OmniCoord IA.\nSi vous recevez ce message, la configuration mail est correcte.\n\nOmniCoord IA"
-        )
-        if ok: st.success(f"✅ {msg}")
-        else: st.error(f"❌ {msg}")
+            if st.form_submit_button("Enregistrer"):
+                if mail_p and len(mail_p) not in [16, 19]:
+                    st.warning("Un mot de passe d'application Gmail fait normalement 16 caractères.")
+                mdp_chiffre = chiffrer_mdp_mail(mail_p) if mail_p else ""
+                update_data = {"mail_smtp_email": mail_e, "mail_imap_server": mail_i}
+                if mdp_chiffre:
+                    update_data["mail_smtp_password"] = mdp_chiffre
+                if sb_update("profils", update_data, "id", USER_ID):
+                    st.session_state["mail_config"] = {
+                        "email": mail_e,
+                        "password": mail_p or cfg.get("password", ""),
+                        "imap": mail_i
+                    }
+                    audit("UPDATE_MAIL_CONFIG", "profils", USER_ID)
+                    st.success("✅ Configuration mail enregistrée (mot de passe chiffré).")
+
+        # Test de connexion mail
+        st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
+        st.subheader("🧪 Tester l'envoi de mail")
+        email_test = st.text_input("Envoyer un email de test à :")
+        if st.button("Envoyer le test") and email_test:
+            ok, msg = envoyer_email(
+                email_test,
+                "Test OmniCoord IA — Configuration mail OK",
+                "Bonjour,\n\nCeci est un email de test envoyé depuis OmniCoord IA.\n\nSi vous recevez ce message, votre configuration mail est opérationnelle et vous pouvez envoyer les identifiants à vos clients.\n\nOmniCoord IA"
+            )
+            if ok: st.success(f"✅ {msg}")
+            else: st.error(f"❌ {msg}")
+
+    else:
+        # -------------------------------------------------------
+        #  PROFIL CLIENT = SAAD / SSIAD
+        #  Il configure sa boîte mail pour envoyer les
+        #  sollicitations d'urgence à ses intervenants.
+        # -------------------------------------------------------
+        st.caption(f"Structure : **{st.session_state.get('structure_nom', '—')}**")
+
+        st.subheader("🔑 Changer mon mot de passe")
+        with st.form("form_mdp"):
+            n1 = st.text_input("Nouveau mot de passe", type="password")
+            n2 = st.text_input("Confirmer", type="password")
+            if st.form_submit_button("Mettre à jour"):
+                if not n1 or n1 != n2:
+                    st.error("Les mots de passe ne correspondent pas.")
+                elif len(n1) < 8:
+                    st.error("8 caractères minimum.")
+                else:
+                    try:
+                        sb.auth.update_user({"password": n1})
+                        audit("CHANGE_PASSWORD", "profils", USER_ID)
+                        st.success("Mot de passe mis à jour.")
+                    except Exception as e:
+                        st.error(f"Erreur : {e}")
+
+        st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
+        st.subheader("📧 Ma boîte mail (sollicitations intervenants)")
+        st.info("💡 Gmail : utilisez un **mot de passe d'application** (pas votre mot de passe principal). Générez-en un sur myaccount.google.com > Sécurité > Mots de passe des applications.")
+
+        with st.form("form_mail"):
+            cfg = st.session_state.get("mail_config", {})
+            mail_e = st.text_input("Adresse e-mail d'envoi", value=cfg.get("email", ""))
+            mail_p = st.text_input("Mot de passe d'application Gmail (16 caractères)", type="password",
+                                    help="Ce mot de passe est chiffré avant d'être stocké.")
+            mail_i = st.text_input("Serveur IMAP", value=cfg.get("imap", "imap.gmail.com"))
+
+            if st.form_submit_button("Enregistrer"):
+                if mail_p and len(mail_p) not in [16, 19]:
+                    st.warning("Un mot de passe d'application Gmail fait normalement 16 caractères.")
+                mdp_chiffre = chiffrer_mdp_mail(mail_p) if mail_p else ""
+                update_data = {"mail_smtp_email": mail_e, "mail_imap_server": mail_i}
+                if mdp_chiffre:
+                    update_data["mail_smtp_password"] = mdp_chiffre
+                if sb_update("profils", update_data, "id", USER_ID):
+                    st.session_state["mail_config"] = {
+                        "email": mail_e,
+                        "password": mail_p or cfg.get("password", ""),
+                        "imap": mail_i
+                    }
+                    audit("UPDATE_MAIL_CONFIG", "profils", USER_ID)
+                    st.success("✅ Configuration mail enregistrée (mot de passe chiffré).")
+
+        # Test de connexion mail
+        st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
+        st.subheader("🧪 Tester la connexion mail")
+        email_test = st.text_input("Envoyer un email de test à :")
+        if st.button("Envoyer le test") and email_test:
+            ok, msg = envoyer_email(
+                email_test,
+                "Test OmniCoord IA — Connexion mail OK",
+                "Bonjour,\n\nCeci est un email de test envoyé depuis OmniCoord IA.\nSi vous recevez ce message, la configuration mail est correcte.\n\nOmniCoord IA"
+            )
+            if ok: st.success(f"✅ {msg}")
+            else: st.error(f"❌ {msg}")
 
 
 # ============================================================
-#  🛠️ ADMINISTRATION
+#  🛠️ ADMINISTRATION — Cockpit commercial SaaS
+#  Visible uniquement par l'admin (éditeur OmniCoord)
 # ============================================================
 elif onglet == "🛠️ Administration" and IS_ADMIN:
-    st.subheader("🏢 Vue par structure")
-    df_structs_admin = sb_select("structures", order="nom")
-    if not df_structs_admin.empty:
-        st.dataframe(df_structs_admin[["nom","date_creation","statut"]], use_container_width=True, hide_index=True)
 
-    st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
-    st.subheader("👥 Utilisateurs")
-    df_users_a = sb_select("profils", order="email")
-    if not df_users_a.empty:
-        st.dataframe(df_users_a[["email","statut_abonnement","date_fin_essai","nb_requetes_ia","quota_max_ia"]],
-                    use_container_width=True, hide_index=True)
+    APP_URL = "https://omnicoord-ia-bxgnddxxgniwnhhu9pmo9r.streamlit.app"
 
-    st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
-    st.subheader("📋 Journal d'audit (50 dernières actions)")
-    df_audit = sb_select("audit_logs", order="created_at")
-    if not df_audit.empty:
-        df_audit_aff = df_audit.sort_values("created_at", ascending=False).head(50)
-        st.dataframe(df_audit_aff[["created_at","action","table_name","record_id"]],
-                    use_container_width=True, hide_index=True)
+    tab_clients, tab_creer, tab_quotas, tab_audit, tab_secu = st.tabs([
+        "📋 Mes clients",
+        "➕ Créer un accès client",
+        "📊 Quotas IA",
+        "📋 Journal d'audit",
+        "🔐 Sécurité"
+    ])
 
-    st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
-    st.subheader("🔐 État de la sécurité")
-    st.markdown("""
-    - ✅ **Auth** : Supabase Auth (bcrypt natif + JWT)
-    - ✅ **RLS** : Cloisonnement par structure garanti au niveau base de données
-    - ✅ **Mots de passe mail** : Chiffrés avec Fernet avant stockage
-    - ✅ **Anti brute-force** : Blocage après 10 échecs / 15 min
-    - ✅ **Injection HTML** : html.escape() sur toutes les valeurs injectées
-    - ✅ **Audit log** : Toutes les actions sensibles tracées
-    - ✅ **PDF** : Unicode natif (fpdf2), plus de caractères manquants
-    - ✅ **Quota IA** : Re-vérifié en base à chaque appel (pas en session)
-    """)
+    # ----------------------------------------------------------
+    #  TAB 1 : LISTE DES CLIENTS
+    # ----------------------------------------------------------
+    with tab_clients:
+        st.subheader("📋 Mes clients — Vue d'ensemble")
+
+        df_structs_admin = sb_select("structures", order="nom")
+        df_users_admin = sb_select("profils", order="email")
+
+        # Exclure l'admin de la liste des clients
+        df_clients = df_users_admin[df_users_admin["est_admin"] == False].copy() if not df_users_admin.empty else pd.DataFrame()
+
+        # Métriques commerciales
+        col_c1, col_c2, col_c3, col_c4 = st.columns(4)
+        nb_clients_total = len(df_clients)
+        nb_actifs = 0
+        nb_expires = 0
+        nb_essai = 0
+        if not df_clients.empty:
+            df_clients["date_fin_dt"] = pd.to_datetime(df_clients["date_fin_essai"], errors="coerce").dt.date
+            aujourdhui = datetime.date.today()
+            nb_actifs = len(df_clients[df_clients["date_fin_dt"] >= aujourdhui])
+            nb_expires = len(df_clients[df_clients["date_fin_dt"] < aujourdhui])
+            nb_essai = len(df_clients[df_clients["statut_abonnement"] == "ESSAI"])
+
+        col_c1.metric("👥 Total clients", nb_clients_total)
+        col_c2.metric("✅ Actifs", nb_actifs)
+        col_c3.metric("⏰ En essai", nb_essai)
+        col_c4.metric("🔴 Expirés", nb_expires, delta=f"-{nb_expires}" if nb_expires > 0 else None, delta_color="inverse")
+
+        st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
+
+        if df_clients.empty:
+            st.info("Aucun client créé pour l'instant. Utilisez l'onglet « Créer un accès client » pour commencer.")
+        else:
+            # Récupérer les noms de structure
+            struct_noms = {}
+            if not df_structs_admin.empty:
+                struct_noms = {str(r["id"]): r["nom"] for _, r in df_structs_admin.iterrows()}
+
+            for _, client in df_clients.iterrows():
+                struct_nom = h(struct_noms.get(str(client.get("structure_id", "")), "Non assignée"))
+                email_c = h(client["email"])
+                statut_c = client["statut_abonnement"]
+                date_fin_c = client.get("date_fin_essai", "—")
+
+                # Couleur selon statut
+                if client.get("date_fin_dt") and client["date_fin_dt"] < datetime.date.today():
+                    couleur = "#e0554f"
+                    badge = "Expiré"
+                elif statut_c == "PRO":
+                    couleur = "#3fae74"
+                    badge = "PRO"
+                else:
+                    couleur = "#d99a3d"
+                    badge = "Essai"
+
+                st.markdown(f"""
+                    <div class="oc-card" style="border-left-color:{couleur};">
+                        <div style="display:flex; justify-content:space-between; align-items:center;">
+                            <span style="font-size:16px; font-weight:700;">🏢 {struct_nom}</span>
+                            <span class="oc-badge" style="background:{couleur};">{badge}</span>
+                        </div>
+                        <div style="color:#b8c2cc; font-size:13px; margin-top:6px;">
+                            📧 {email_c} &nbsp;|&nbsp; 📅 Accès jusqu'au {h(str(date_fin_c))} &nbsp;|&nbsp;
+                            🤖 IA : {client.get('nb_requetes_ia', 0)}/{client.get('quota_max_ia', 20)}
+                        </div>
+                    </div>
+                """, unsafe_allow_html=True)
+
+                with st.expander(f"⚙️ Gérer — {email_c}"):
+                    col_g1, col_g2, col_g3 = st.columns(3)
+
+                    with col_g1:
+                        # Prolonger l'accès
+                        jours_prolonger = st.number_input("Prolonger (jours)", min_value=1, value=30, key=f"prol_{client['id']}")
+                        if st.button("📅 Prolonger l'accès", key=f"btn_prol_{client['id']}"):
+                            nouvelle_fin = (datetime.date.today() + datetime.timedelta(days=int(jours_prolonger))).isoformat()
+                            if sb_update("profils", {"date_fin_essai": nouvelle_fin}, "id", str(client["id"])):
+                                audit("PROLONGER_ACCES", "profils", str(client["id"]), {"nouvelle_fin": nouvelle_fin})
+                                st.success(f"Accès prolongé jusqu'au {date_fr(nouvelle_fin, 'court')}")
+                                st.rerun()
+
+                    with col_g2:
+                        # Changer le statut d'abonnement
+                        nv_statut = st.selectbox("Statut abonnement", ["ESSAI", "PRO", "SUSPENDU"],
+                                                  index=["ESSAI", "PRO", "SUSPENDU"].index(statut_c) if statut_c in ["ESSAI", "PRO", "SUSPENDU"] else 0,
+                                                  key=f"stat_{client['id']}")
+                        if st.button("💳 Mettre à jour le statut", key=f"btn_stat_{client['id']}"):
+                            if sb_update("profils", {"statut_abonnement": nv_statut}, "id", str(client["id"])):
+                                audit("UPDATE_ABONNEMENT", "profils", str(client["id"]), {"statut": nv_statut})
+                                st.success(f"Statut mis à jour → {nv_statut}")
+                                st.rerun()
+
+                    with col_g3:
+                        # Modifier le quota IA
+                        nv_quota = st.number_input("Quota IA max", min_value=1, value=int(client.get("quota_max_ia", 20)), key=f"quota_{client['id']}")
+                        if st.button("🤖 Modifier le quota", key=f"btn_quota_{client['id']}"):
+                            if sb_update("profils", {"quota_max_ia": int(nv_quota)}, "id", str(client["id"])):
+                                audit("UPDATE_QUOTA", "profils", str(client["id"]), {"quota": nv_quota})
+                                st.success(f"Quota IA mis à jour → {nv_quota}")
+                                st.rerun()
+
+                    st.markdown("<br>", unsafe_allow_html=True)
+
+                    # Remettre le quota IA à zéro
+                    if st.button("🔄 Remettre le compteur IA à 0", key=f"reset_{client['id']}"):
+                        if sb_update("profils", {"nb_requetes_ia": 0}, "id", str(client["id"])):
+                            st.success("Compteur IA remis à zéro.")
+                            st.rerun()
+
+                    # Renvoyer les identifiants par mail
+                    if st.button("📧 Renvoyer les identifiants par mail", key=f"remail_{client['id']}"):
+                        ok, msg = envoyer_email(
+                            client["email"],
+                            "OmniCoord IA — Vos identifiants de connexion",
+                            f"Bonjour,\n\n"
+                            f"Voici vos identifiants pour accéder à OmniCoord IA :\n\n"
+                            f"🔗 Lien : {APP_URL}\n"
+                            f"📧 Email : {client['email']}\n"
+                            f"📅 Accès valable jusqu'au : {date_fin_c}\n\n"
+                            f"Si vous avez oublié votre mot de passe, contactez l'administrateur.\n\n"
+                            f"Cordialement,\nOmniCoord IA"
+                        )
+                        if ok: st.success(f"✅ Email envoyé à {client['email']}")
+                        else: st.error(f"❌ {msg}")
+
+                    # Supprimer le client
+                    st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
+                    confirm_del = st.checkbox(f"Je confirme la suppression de {email_c} et toutes ses données", key=f"confirm_{client['id']}")
+                    if st.button("🗑️ Supprimer définitivement ce client", key=f"del_{client['id']}"):
+                        if confirm_del:
+                            try:
+                                # Supprimer dans Supabase Auth
+                                get_supabase_admin().auth.admin.delete_user(str(client["id"]))
+                                # Supprimer le profil (les données métier restent liées à la structure)
+                                sb_delete("profils", "id", str(client["id"]))
+                                audit("DELETE_CLIENT", "profils", str(client["id"]), {"email": client["email"]})
+                                st.success(f"Client {client['email']} supprimé.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Erreur : {e}")
+                        else:
+                            st.warning("Cochez la case de confirmation.")
+
+    # ----------------------------------------------------------
+    #  TAB 2 : CRÉER UN ACCÈS CLIENT
+    # ----------------------------------------------------------
+    with tab_creer:
+        st.subheader("➕ Créer un accès client")
+        st.caption("Crée un compte pour un nouveau client. Un email avec le lien, l'identifiant et le mot de passe lui sera envoyé automatiquement.")
+
+        with st.form("form_creer_client"):
+            col_c1, col_c2 = st.columns(2)
+            with col_c1:
+                nom_structure = st.text_input("Nom de la structure (SAAD / SSIAD) *")
+                email_client = st.text_input("Email du client *")
+                mdp_client = st.text_input("Mot de passe temporaire *")
+            with col_c2:
+                duree_acces = st.number_input("Durée d'accès (jours)", min_value=1, value=30)
+                statut_abo = st.selectbox("Type d'abonnement", ["ESSAI", "PRO"])
+                quota_ia = st.number_input("Quota IA (nombre de requêtes)", min_value=1, value=20)
+
+            envoyer_mail_auto = st.checkbox("📧 Envoyer automatiquement les identifiants par email", value=True)
+            btn_creer = st.form_submit_button("🚀 Créer l'accès client")
+
+            if btn_creer:
+                if not nom_structure or not email_client or not mdp_client:
+                    st.error("Tous les champs avec * sont obligatoires.")
+                elif len(mdp_client) < 8:
+                    st.error("Le mot de passe doit faire au moins 8 caractères.")
+                else:
+                    # 1. Créer la structure
+                    struct_existante = sb_select("structures", {"nom": nom_structure.strip()})
+                    if struct_existante.empty:
+                        struct_res = sb_insert("structures", {"nom": nom_structure.strip()})
+                        if struct_res:
+                            struct_id = struct_res["id"]
+                        else:
+                            struct_id = None
+                    else:
+                        struct_id = struct_existante.iloc[0]["id"]
+
+                    if struct_id:
+                        date_fin = (datetime.date.today() + datetime.timedelta(days=int(duree_acces))).isoformat()
+                        try:
+                            # 2. Créer l'utilisateur dans Supabase Auth
+                            auth_res = get_supabase_admin().auth.admin.create_user({
+                                "email": email_client.strip().lower(),
+                                "password": mdp_client,
+                                "email_confirm": True
+                            })
+                            new_uid = auth_res.user.id
+
+                            # 3. Créer le profil
+                            sb_insert("profils", {
+                                "id": new_uid,
+                                "structure_id": struct_id,
+                                "email": email_client.strip().lower(),
+                                "est_admin": False,
+                                "statut_abonnement": statut_abo,
+                                "quota_max_ia": int(quota_ia),
+                                "date_fin_essai": date_fin
+                            })
+                            audit("CREATE_CLIENT", "profils", new_uid, {
+                                "structure": nom_structure, "email": email_client, "duree": duree_acces
+                            })
+
+                            st.success(f"✅ Accès créé pour **{email_client}** (structure : {nom_structure}) jusqu'au **{date_fr(date_fin, 'court')}**")
+
+                            # 4. Envoyer les identifiants par mail (si coché)
+                            if envoyer_mail_auto:
+                                ok, msg = envoyer_email(
+                                    email_client,
+                                    "Bienvenue sur OmniCoord IA — Vos identifiants",
+                                    f"Bonjour,\n\n"
+                                    f"Votre accès à OmniCoord IA a été créé avec succès.\n\n"
+                                    f"🔗 Lien de connexion : {APP_URL}\n\n"
+                                    f"📧 Identifiant : {email_client}\n"
+                                    f"🔑 Mot de passe : {mdp_client}\n\n"
+                                    f"📅 Votre accès est valable jusqu'au {date_fr(date_fin, 'court')}.\n\n"
+                                    f"⚠️ Nous vous recommandons de changer votre mot de passe dès votre première connexion (Mon Profil > Changer mon mot de passe).\n\n"
+                                    f"Pour toute question, contactez-nous.\n\n"
+                                    f"Cordialement,\n"
+                                    f"L'équipe OmniCoord IA"
+                                )
+                                if ok:
+                                    st.success(f"📧 Email envoyé à {email_client}")
+                                else:
+                                    st.warning(f"⚠️ Accès créé mais email non envoyé : {msg}")
+                                    st.info(f"Identifiants à transmettre manuellement :\n- Lien : {APP_URL}\n- Email : {email_client}\n- Mot de passe : {mdp_client}")
+                            else:
+                                st.info(f"📋 Identifiants à transmettre manuellement :\n- **Lien** : {APP_URL}\n- **Email** : {email_client}\n- **Mot de passe** : {mdp_client}")
+
+                        except Exception as e:
+                            err_msg = str(e)
+                            if "already been registered" in err_msg or "already exists" in err_msg:
+                                st.error("Cet email est déjà utilisé par un autre compte.")
+                            else:
+                                logger.error(f"Création client: {e}")
+                                st.error(f"Erreur lors de la création : {e}")
+
+    # ----------------------------------------------------------
+    #  TAB 3 : QUOTAS IA
+    # ----------------------------------------------------------
+    with tab_quotas:
+        st.subheader("📊 Quotas IA — Vue globale")
+        df_users_q = sb_select("profils", order="email")
+        if not df_users_q.empty:
+            df_clients_q = df_users_q[df_users_q["est_admin"] == False].copy()
+            if not df_clients_q.empty:
+                df_clients_q["usage_%"] = (df_clients_q["nb_requetes_ia"] / df_clients_q["quota_max_ia"] * 100).round(1)
+                st.dataframe(
+                    df_clients_q[["email", "nb_requetes_ia", "quota_max_ia", "usage_%", "statut_abonnement"]].rename(columns={
+                        "email": "Client",
+                        "nb_requetes_ia": "Utilisées",
+                        "quota_max_ia": "Quota max",
+                        "usage_%": "Utilisation %",
+                        "statut_abonnement": "Abonnement"
+                    }),
+                    use_container_width=True, hide_index=True
+                )
+            else:
+                st.info("Aucun client créé.")
+        else:
+            st.info("Aucune donnée disponible.")
+
+    # ----------------------------------------------------------
+    #  TAB 4 : JOURNAL D'AUDIT
+    # ----------------------------------------------------------
+    with tab_audit:
+        st.subheader("📋 Journal d'audit — 50 dernières actions")
+        df_audit = sb_select("audit_logs", order="created_at")
+        if not df_audit.empty:
+            df_audit_aff = df_audit.sort_values("created_at", ascending=False).head(50)
+            st.dataframe(
+                df_audit_aff[["created_at", "action", "table_name", "record_id"]].rename(columns={
+                    "created_at": "Date",
+                    "action": "Action",
+                    "table_name": "Table",
+                    "record_id": "Enregistrement"
+                }),
+                use_container_width=True, hide_index=True
+            )
+        else:
+            st.caption("Aucune action enregistrée.")
+
+    # ----------------------------------------------------------
+    #  TAB 5 : SÉCURITÉ
+    # ----------------------------------------------------------
+    with tab_secu:
+        st.subheader("🔐 État de la sécurité")
+        st.markdown("""
+        - ✅ **Auth** : Supabase Auth (bcrypt natif + JWT)
+        - ✅ **RLS** : Cloisonnement par structure garanti au niveau base de données
+        - ✅ **Mots de passe mail** : Chiffrés avec Fernet avant stockage
+        - ✅ **Anti brute-force** : Blocage après 10 échecs / 15 min
+        - ✅ **Injection HTML** : html.escape() sur toutes les valeurs injectées
+        - ✅ **Audit log** : Toutes les actions sensibles tracées
+        - ✅ **PDF** : Unicode natif (fpdf2), plus de caractères manquants
+        - ✅ **Quota IA** : Re-vérifié en base à chaque appel (pas en session)
+        """)
