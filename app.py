@@ -792,29 +792,23 @@ st.sidebar.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=Tr
 
 
 # ============================================================
-#  MENU PRINCIPAL — Différent selon admin / client
+#  MENU PRINCIPAL — Admin voit tout + Administration
 # ============================================================
 st.sidebar.markdown("### 📋 Menu")
 
+_onglets = [
+    "🏠 Tableau de bord",
+    "🧑‍🤝‍🧑 Vivier & Sourcing",
+    "🎯 Matching IA",
+    "❤️ Bénéficiaires",
+    "📝 Documents & Transmissions",
+    "📅 Plannings & Urgences",
+    "✅ Conformité & Habilitations",
+    "📊 Suivi des heures",
+    "👤 Mon Profil",
+]
 if IS_ADMIN:
-    # L'admin = éditeur SaaS. Il ne gère que les accès clients.
-    _onglets = [
-        "🛠️ Administration",
-        "👤 Mon Profil",
-    ]
-else:
-    # Le client = SAAD/SSIAD. Il utilise l'outil au quotidien.
-    _onglets = [
-        "🏠 Tableau de bord",
-        "🧑‍🤝‍🧑 Vivier & Sourcing",
-        "🎯 Matching IA",
-        "❤️ Bénéficiaires",
-        "📝 Documents & Transmissions",
-        "📅 Plannings & Urgences",
-        "✅ Conformité & Habilitations",
-        "📊 Suivi des heures",
-        "👤 Mon Profil",
-    ]
+    _onglets.insert(0, "🛠️ Administration")
 
 onglet = st.sidebar.radio("Navigation", _onglets, label_visibility="collapsed")
 
