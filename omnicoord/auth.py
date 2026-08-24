@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import time
 
 import streamlit as st
 
@@ -36,14 +37,20 @@ def _load_authenticated_profile(user_id: str) -> tuple[dict | None, str]:
 
 def check_password() -> bool:
     if st.session_state.get("password_correct", False):
-        # Une session UI n'est acceptée que si le client Supabase porte encore
-        # une vraie session authentifiée.
+        # Évite un aller-retour Supabase à CHAQUE clic/navigation Streamlit.
+        # La session JWT est revérifiée au maximum une fois par minute ; le logout
+        # reste immédiat puisqu'il efface le session_state et appelle sign_out().
+        now = time.monotonic()
+        last_verified = float(st.session_state.get("_auth_last_verified", 0.0) or 0.0)
+        if now - last_verified < 60:
+            return True
         try:
             if get_supabase().auth.get_user().user:
+                st.session_state["_auth_last_verified"] = now
                 return True
         except Exception:
             logger.warning("Session Streamlit présente mais session Supabase invalide")
-        for key in ["password_correct", "user_id", "is_admin", "structure_id"]:
+        for key in ["password_correct", "user_id", "is_admin", "structure_id", "_auth_last_verified"]:
             st.session_state.pop(key, None)
 
     st.markdown(
@@ -109,6 +116,7 @@ def check_password() -> bool:
                         "structure_nom": structure_nom,
                         "statut_abonnement": profil.get("statut_abonnement", "ESSAI"),
                         "quota_max_ia": profil.get("quota_max_ia", 0),
+                        "_auth_last_verified": time.monotonic(),
                         # Aucun mot de passe SMTP déchiffré n'est conservé en session.
                         "mail_config": {
                             "email": profil.get("mail_smtp_email", ""),

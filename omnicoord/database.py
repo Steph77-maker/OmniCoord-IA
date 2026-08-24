@@ -67,6 +67,47 @@ def _generic_db_error(operation: str, table: str) -> None:
     logger.exception("%s failed on table=%s", operation, table)
 
 
+def _cache_user_key() -> str:
+    """Clé de cache isolée par utilisateur/session métier."""
+    return str(st.session_state.get("user_id") or "anonymous")
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def _cached_select(
+    user_key: str,
+    table: str,
+    filters_items: tuple,
+    eq_col: str | None,
+    eq_val_repr: str | None,
+    order: str | None,
+    limit: int | None,
+) -> list[dict]:
+    """Lecture Supabase mise en cache brièvement.
+
+    Le cache est séparé par utilisateur afin d'éviter tout mélange de données
+    entre sessions. On renvoie des objets sérialisables puis `sb_select` recrée
+    un DataFrame.
+    """
+    filters = dict(filters_items) if filters_items else None
+    q = get_supabase().table(table).select("*")
+    if filters:
+        for col, val in filters.items():
+            q = q.eq(col, val)
+    if eq_col and eq_val_repr is not None:
+        q = q.eq(eq_col, eq_val_repr)
+    if order:
+        q = q.order(order)
+    if limit:
+        q = q.limit(limit)
+    res = q.execute()
+    return list(res.data or [])
+
+
+def clear_read_cache() -> None:
+    """Invalide les lectures après une mutation de données."""
+    _cached_select.clear()
+
+
 def sb_select(
     table: str,
     filters: dict | None = None,
@@ -84,18 +125,18 @@ def sb_select(
     casser les écrans historiques pendant la migration.
     """
     try:
-        q = get_supabase().table(table).select("*")
-        if filters:
-            for col, val in filters.items():
-                q = q.eq(col, val)
-        if eq_col and eq_val is not None:
-            q = q.eq(eq_col, eq_val)
-        if order:
-            q = q.order(order)
-        if limit:
-            q = q.limit(limit)
-        res = q.execute()
-        return pd.DataFrame(res.data) if res.data else pd.DataFrame()
+        filters_items = tuple(sorted((filters or {}).items()))
+        eq_val_repr = None if eq_val is None else str(eq_val)
+        rows = _cached_select(
+            _cache_user_key(),
+            table,
+            filters_items,
+            eq_col,
+            eq_val_repr,
+            order,
+            limit,
+        )
+        return pd.DataFrame(rows) if rows else pd.DataFrame()
     except Exception as exc:
         _generic_db_error("SELECT", table)
         if strict:
@@ -106,6 +147,7 @@ def sb_select(
 def sb_insert(table: str, data: dict, *, strict: bool = False) -> dict | None:
     try:
         res = get_supabase().table(table).insert(data).execute()
+        clear_read_cache()
         return res.data[0] if res.data else None
     except Exception as exc:
         _generic_db_error("INSERT", table)
@@ -125,6 +167,7 @@ def sb_update(
 ) -> bool:
     try:
         get_supabase().table(table).update(data).eq(eq_col, eq_val).execute()
+        clear_read_cache()
         return True
     except Exception as exc:
         _generic_db_error("UPDATE", table)
@@ -137,6 +180,7 @@ def sb_update(
 def sb_delete(table: str, eq_col: str, eq_val, *, strict: bool = False) -> bool:
     try:
         get_supabase().table(table).delete().eq(eq_col, eq_val).execute()
+        clear_read_cache()
         return True
     except Exception as exc:
         _generic_db_error("DELETE", table)

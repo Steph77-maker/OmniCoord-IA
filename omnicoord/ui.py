@@ -72,68 +72,71 @@ def render():
     st.sidebar.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
 
     # --- Admin sidebar ---
+    # Les outils admin chargent plusieurs tables. Ils restent repliés par défaut
+    # pour ne pas ralentir chaque changement de page.
     if IS_ADMIN:
         st.sidebar.markdown("### 👑 Administration")
+        show_quick_admin = st.sidebar.checkbox(
+            "Afficher les outils admin rapides", value=False, key="show_quick_admin"
+        )
 
-        with st.sidebar.expander("➕ Créer un accès"):
-            df_structs = sb_select("structures", order="nom")
-            with st.form("form_add_user"):
-                struct_existante = st.selectbox(
-                    "Structure existante",
-                    [""] + (df_structs["nom"].tolist() if not df_structs.empty else [])
-                )
-                struct_nouvelle = st.text_input("OU nouvelle structure")
-                p_email = st.text_input("Email utilisateur")
-                p_pwd = st.text_input("Mot de passe temporaire")
-                p_duree = st.number_input("Durée d'accès (jours)", min_value=1, value=30)
-                btn_add = st.form_submit_button("Créer l'accès")
+        if show_quick_admin:
+            with st.sidebar.expander("➕ Créer un accès"):
+                df_structs = sb_select("structures", order="nom")
+                with st.form("form_add_user"):
+                    struct_existante = st.selectbox(
+                        "Structure existante",
+                        [""] + (df_structs["nom"].tolist() if not df_structs.empty else [])
+                    )
+                    struct_nouvelle = st.text_input("OU nouvelle structure")
+                    p_email = st.text_input("Email utilisateur")
+                    p_pwd = st.text_input("Mot de passe temporaire")
+                    p_duree = st.number_input("Durée d'accès (jours)", min_value=1, value=30)
+                    btn_add = st.form_submit_button("Créer l'accès")
 
-                if btn_add and p_email and p_pwd:
-                    if len(p_pwd) < 8:
-                        st.error("8 caractères minimum pour le mot de passe.")
-                    else:
-                        nom_struct = struct_nouvelle.strip() or struct_existante
-                        if not nom_struct:
-                            st.error("Choisissez ou créez une structure.")
+                    if btn_add and p_email and p_pwd:
+                        if len(p_pwd) < 8:
+                            st.error("8 caractères minimum pour le mot de passe.")
                         else:
-                            # Créer la structure si nouvelle
-                            struct_row = sb_select("structures", {"nom": nom_struct})
-                            if struct_row.empty:
-                                struct_row = sb_insert("structures", {"nom": nom_struct})
-                                struct_id = struct_row["id"] if struct_row else None
+                            nom_struct = struct_nouvelle.strip() or struct_existante
+                            if not nom_struct:
+                                st.error("Choisissez ou créez une structure.")
                             else:
-                                struct_id = struct_row.iloc[0]["id"]
+                                struct_row = sb_select("structures", {"nom": nom_struct})
+                                if struct_row.empty:
+                                    struct_row = sb_insert("structures", {"nom": nom_struct})
+                                    struct_id = struct_row["id"] if struct_row else None
+                                else:
+                                    struct_id = struct_row.iloc[0]["id"]
 
-                            if struct_id:
-                                date_fin = (datetime.date.today() + datetime.timedelta(days=int(p_duree))).isoformat()
-                                try:
-                                    # Créer via Supabase Auth (admin)
-                                    auth_res = create_auth_user(p_email, p_pwd)
-                                    new_uid = auth_res.user.id
-                                    sb_insert("profils", {
-                                        "id": new_uid,
-                                        "structure_id": struct_id,
-                                        "email": p_email,
-                                        "est_admin": False,
-                                        "statut_abonnement": "ESSAI",
-                                        "quota_max_ia": 20,
-                                        "date_fin_essai": date_fin
-                                    })
-                                    audit("CREATE_USER", "profils", new_uid, {"structure": nom_struct})
-                                    st.success(f"✅ Accès créé pour {p_email} jusqu'au {date_fr(date_fin, 'court')}")
-                                except Exception as e:
-                                    st.error(f"Erreur : {e}")
+                                if struct_id:
+                                    date_fin = (datetime.date.today() + datetime.timedelta(days=int(p_duree))).isoformat()
+                                    try:
+                                        auth_res = create_auth_user(p_email, p_pwd)
+                                        new_uid = auth_res.user.id
+                                        sb_insert("profils", {
+                                            "id": new_uid,
+                                            "structure_id": struct_id,
+                                            "email": p_email,
+                                            "est_admin": False,
+                                            "statut_abonnement": "ESSAI",
+                                            "quota_max_ia": 20,
+                                            "date_fin_essai": date_fin
+                                        })
+                                        audit("CREATE_USER", "profils", new_uid, {"structure": nom_struct})
+                                        st.success(f"✅ Accès créé pour {p_email} jusqu'au {date_fr(date_fin, 'court')}")
+                                    except Exception as e:
+                                        st.error(f"Erreur : {e}")
 
-        with st.sidebar.expander("📊 Quotas IA"):
-            df_users = sb_select("profils", order="email")
-            if not df_users.empty:
-                st.dataframe(
-                    df_users[["email", "nb_requetes_ia", "quota_max_ia", "statut_abonnement", "date_fin_essai"]],
-                    use_container_width=True, hide_index=True
-                )
-                email_reset = st.text_input("Email à réinitialiser")
-                if st.button("Remettre à 0"):
-                    if email_reset:
+            with st.sidebar.expander("📊 Quotas IA"):
+                df_users = sb_select("profils", order="email")
+                if not df_users.empty:
+                    st.dataframe(
+                        df_users[["email", "nb_requetes_ia", "quota_max_ia", "statut_abonnement", "date_fin_essai"]],
+                        use_container_width=True, hide_index=True
+                    )
+                    email_reset = st.text_input("Email à réinitialiser")
+                    if st.button("Remettre à 0") and email_reset:
                         sb_update("profils", {"nb_requetes_ia": 0}, "email", email_reset)
                         st.success("Quota réinitialisé.")
 

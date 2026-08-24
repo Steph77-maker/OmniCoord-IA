@@ -50,6 +50,7 @@ def _reserve_quota() -> tuple[bool, int, int]:
             {"p_user_id": user_id},
         ).execute()
         payload = _normalize_quota_payload(res.data)
+        clear_quota_cache()
         return (
             bool(payload.get("allowed", False)),
             int(payload.get("used", 0) or 0),
@@ -60,26 +61,35 @@ def _reserve_quota() -> tuple[bool, int, int]:
         return False, 0, 0
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def _quota_status_cached(user_id: str) -> tuple[bool, int, int]:
+    res = (
+        get_supabase()
+        .table("profils")
+        .select("nb_requetes_ia,quota_max_ia,statut_abonnement")
+        .eq("id", user_id)
+        .single()
+        .execute()
+    )
+    row = res.data or {}
+    used = int(row.get("nb_requetes_ia", 0) or 0)
+    quota = int(row.get("quota_max_ia", 0) or 0)
+    if row.get("statut_abonnement") == "PRO":
+        return True, used, quota
+    return used < quota, used, quota
+
+
+def clear_quota_cache() -> None:
+    _quota_status_cached.clear()
+
+
 def peut_utiliser_ia() -> tuple[bool, int, int]:
-    """Lecture d'affichage uniquement ; l'autorisation réelle se fait par réservation."""
+    """Lecture d'affichage mise en cache ; l'autorisation réelle reste atomique."""
     try:
-        user = get_supabase().auth.get_user().user
-        if not user:
+        user_id = str(st.session_state.get("user_id") or "")
+        if not user_id:
             return False, 0, 0
-        res = (
-            get_supabase()
-            .table("profils")
-            .select("nb_requetes_ia,quota_max_ia,statut_abonnement")
-            .eq("id", str(user.id))
-            .single()
-            .execute()
-        )
-        row = res.data or {}
-        used = int(row.get("nb_requetes_ia", 0) or 0)
-        quota = int(row.get("quota_max_ia", 0) or 0)
-        if row.get("statut_abonnement") == "PRO":
-            return True, used, quota
-        return used < quota, used, quota
+        return _quota_status_cached(user_id)
     except Exception:
         logger.exception("peut_utiliser_ia() failed")
         return False, 0, 0
