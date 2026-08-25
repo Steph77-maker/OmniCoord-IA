@@ -24,7 +24,6 @@ from .cv_service import analyse_cv
 
 # Aliases conservés pour limiter les changements de comportement pendant la migration.
 sb = core.sb
-model = core.model
 IA_DISPONIBLE = core.IA_DISPONIBLE
 get_supabase_admin = core.get_supabase_admin
 create_auth_user = core.create_auth_user
