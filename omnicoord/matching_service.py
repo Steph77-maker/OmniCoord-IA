@@ -137,6 +137,56 @@ def _valid_habilitations(df: pd.DataFrame, intervenant_id: str) -> list[dict]:
     return out
 
 
+
+def _time_minutes(hour: str, minute: str = "0") -> int:
+    return int(hour) * 60 + int(minute or 0)
+
+
+def _extract_time_range(value: str) -> tuple[int, int] | None:
+    """Extrait le premier créneau horaire d'un texte métier (8h-17h, 10h00 à 12h00...)."""
+    text = str(value or "").lower().replace("h", ":")
+    matches = re.findall(r"\b([0-2]?\d)(?::([0-5]\d))?\b", text)
+    if len(matches) < 2:
+        return None
+    start = _time_minutes(matches[0][0], matches[0][1] or "0")
+    end = _time_minutes(matches[1][0], matches[1][1] or "0")
+    if end <= start:
+        return None
+    return start, end
+
+
+def _availability_score(benef_horaires: str, interv_dispo: str) -> int:
+    """Score explicable : couvre le créneau demandé > chevauche > texte non interprétable."""
+    requested = _extract_time_range(benef_horaires)
+    offered = _extract_time_range(interv_dispo)
+    if requested and offered:
+        rs, re_ = requested
+        os, oe = offered
+        if os <= rs and oe >= re_:
+            return 100
+        overlap = max(0, min(re_, oe) - max(rs, os))
+        requested_len = max(1, re_ - rs)
+        if overlap:
+            return max(30, min(95, round(100 * overlap / requested_len)))
+        return 0
+    if not str(benef_horaires or "").strip() or not str(interv_dispo or "").strip():
+        return 50
+    return _similarity(benef_horaires, interv_dispo)
+
+
+def _zone_score(benef_address: str, interv_zone: str) -> int:
+    """Compare les zones sans prétendre calculer un trajet réel."""
+    a = _words(benef_address)
+    z = _words(interv_zone)
+    if not a or not z:
+        return 50
+    common = a & z
+    if common:
+        # Une ville/zone commune est déjà un signal fort ; le trajet réel viendra plus tard.
+        return min(100, 80 + 10 * min(2, len(common)))
+    return max(0, min(60, _similarity(benef_address, interv_zone)))
+
+
 def _base_score(benef: dict, interv: dict, habilitations: list[dict]) -> dict:
     besoins = " ".join(str(benef.get(k, "") or "") for k in (
         "besoins_recurrents", "gestes_techniques", "notes"
@@ -150,19 +200,19 @@ def _base_score(benef: dict, interv: dict, habilitations: list[dict]) -> dict:
 
     zone_b = str(benef.get("adresse", "") or "")
     zone_i = str(interv.get("zone_geo", "") or "")
-    score_zone = _similarity(zone_b, zone_i) if zone_b and zone_i else 50
+    score_zone = _zone_score(zone_b, zone_i)
     horaires_b = str(benef.get("besoins_horaires", "") or "")
     dispo_i = str(interv.get("disponibilites", "") or "")
-    score_dispo = _similarity(horaires_b, dispo_i) if horaires_b and dispo_i else 50
+    score_dispo = _availability_score(horaires_b, dispo_i)
     if not habilitations:
         score_hab = 50
     else:
         score_hab = round(100 * sum(1 for h in habilitations if h["valide"]) / len(habilitations))
 
-    score_pratique = round(score_zone * 0.65 + score_dispo * 0.35)
+    score_pratique = round(score_zone * 0.45 + score_dispo * 0.55)
     # Les gestes techniques dominent. Les habilitations globales restent informatives :
     # les habilitations obligatoires d'une mission sont filtrées dans replacement_service.
-    score_objectif = round(score_comp * 0.70 + score_pratique * 0.25 + score_hab * 0.05)
+    score_objectif = round(score_comp * 0.72 + score_pratique * 0.25 + score_hab * 0.03)
     return {
         "score_competences": score_comp,
         "score_habilitations": score_hab,
@@ -187,32 +237,39 @@ def match_beneficiary(
     *,
     ai_top_k: int = 5,
 ) -> list[dict]:
-    """Préclasse tous les candidats en Python puis appelle l'IA seulement sur le TOP K."""
+    """Préclasse en Python puis enrichit le TOP K avec UN SEUL appel IA.
+
+    Le rang et le score final restent déterministes. Gemini fournit uniquement
+    une lecture qualitative explicable des meilleurs profils.
+    """
     if intervenants.empty:
         return []
+
     intervenants = _dedupe_intervenants(intervenants)
     habs_all = sb_select("habilitations", {"structure_id": structure_id}, strict=True)
-    candidates = []
+    candidates: list[dict] = []
+
     for _, row in intervenants.iterrows():
         interv = row.to_dict()
         if str(interv.get("statut_dispo", "")) == "Indisponible":
             continue
         habs = _valid_habilitations(habs_all, str(interv.get("id")))
         base = _base_score(beneficiary, interv, habs)
-        candidates.append({"interv": interv, "habilitations": habs, **base})
+        exp, soft = _split_experience(interv.get("experience_texte", ""))
+        candidates.append({
+            "interv": interv,
+            "habilitations": habs,
+            "experience": exp,
+            "soft": soft,
+            **base,
+        })
 
     candidates.sort(key=lambda x: x["score_objectif"], reverse=True)
-    enriched = []
-    ai_enabled_for_run = True
-    for rank, item in enumerate(candidates):
-        interv = item["interv"]
-        exp, soft = _split_experience(interv.get("experience_texte", ""))
-        habs_txt = "; ".join(
-            f"{h['type']} (exp. {h['date_expiration'] or 'NC'}, {'valide' if h['valide'] else 'expirée'})"
-            for h in item["habilitations"]
-        ) or "Aucune habilitation enregistrée"
+    results: list[dict] = []
 
-        result = {
+    for item in candidates:
+        interv = item["interv"]
+        results.append({
             "intervenant_id": str(interv.get("id", "")),
             "intervenant_nom": f"{interv.get('prenom', '')} {interv.get('nom', '')}".strip(),
             "intervenant_statut": interv.get("type_statut", ""),
@@ -223,20 +280,47 @@ def match_beneficiary(
             "score_compatibilite": item["score_compatibilite"],
             "score_empathie": None,
             "score_soft_skills": None,
+            "score_global": item["score_objectif"],
             "ai_used": False,
-            "profil_humain": "Classement métier calculé par OmniCoord.",
+            "profil_humain": "Score fondé sur les données métier enregistrées.",
             "traits_dominants": [],
             "competences_transferables": [],
             "alerte_habilitation": "",
             "alerte_humaine": "",
-            "justification": "Préclassement objectif calculé par OmniCoord.",
-        }
+            "justification": "Classement objectif calculé par OmniCoord.",
+        })
 
-        if rank < ai_top_k and ai_enabled_for_run:
-            prompt = f"""
+    top_n = min(max(0, int(ai_top_k)), len(candidates))
+    if top_n:
+        compact_candidates = []
+        for item in candidates[:top_n]:
+            interv = item["interv"]
+            habs_txt = "; ".join(
+                f"{h['type']} ({'valide' if h['valide'] else 'expirée'}, exp. {h['date_expiration'] or 'sans date'})"
+                for h in item["habilitations"]
+            ) or "Aucune habilitation enregistrée"
+            compact_candidates.append({
+                "intervenant_id": str(interv.get("id", "")),
+                "nom": f"{interv.get('prenom', '')} {interv.get('nom', '')}".strip(),
+                "competences": str(interv.get("competences", "") or ""),
+                "parcours": item["experience"],
+                "savoir_etre_observe": item["soft"],
+                "zone": str(interv.get("zone_geo", "") or ""),
+                "disponibilites": str(interv.get("disponibilites", "") or ""),
+                "habilitations": habs_txt,
+                "scores_objectifs": {
+                    "competences": item["score_competences"],
+                    "habilitations": item["score_habilitations"],
+                    "compatibilite_pratique": item["score_compatibilite"],
+                    "score_metier": item["score_objectif"],
+                },
+            })
+
+        prompt = f"""
 Tu es un assistant d'aide à la décision pour la coordination de services à domicile.
-N'établis aucun diagnostic psychologique ou médical. N'invente aucune information.
-Le moteur Python a déjà calculé les dimensions objectives ; ne les remplace pas.
+Analyse en UNE SEULE réponse les profils ci-dessous. Le moteur Python a déjà classé
+les candidats : tu ne dois NI modifier leur rang NI inventer des faits.
+N'établis aucun diagnostic psychologique ou médical.
 
 BÉNÉFICIAIRE
 Dépendance : {beneficiary.get('niveau_dependance', 'Non renseignée')}
@@ -245,66 +329,48 @@ Gestes techniques : {beneficiary.get('gestes_techniques', 'Non renseignés')}
 Horaires : {beneficiary.get('besoins_horaires', 'Non renseignés')}
 Notes : {beneficiary.get('notes', '')}
 
-INTERVENANT
-Parcours : {exp or 'Non renseigné'}
-Observations professionnelles / savoir-être : {soft or 'Non renseignées'}
-Compétences : {interv.get('competences', '')}
-Habilitations : {habs_txt}
+CANDIDATS (JSON)
+{compact_candidates}
 
-SCORES OBJECTIFS DÉJÀ CALCULÉS PAR PYTHON
-Compétences : {item['score_competences']}
-Habilitations enregistrées : {item['score_habilitations']}
-Compatibilité pratique : {item['score_compatibilite']}
-
-Réponds UNIQUEMENT en JSON :
+Réponds UNIQUEMENT en JSON strict sous cette forme :
 {{
-  "score_empathie": <0-100>,
-  "score_soft_skills": <0-100>,
-  "profil_humain": "<1 phrase prudente fondée sur les données>",
-  "traits_dominants": ["<max 3 observations professionnelles>"],
-  "competences_transferables": ["<max 3 éléments>"] ,
-  "alerte_humaine": "<alerte ou chaîne vide>",
-  "justification": "<2-4 phrases factuelles>"
+  "analyses": [
+    {{
+      "intervenant_id": "<id exact>",
+      "score_empathie": <0-100 ou null>,
+      "score_soft_skills": <0-100 ou null>,
+      "profil_humain": "<1 phrase prudente fondée sur les données>",
+      "traits_dominants": ["<max 3 observations professionnelles>"],
+      "competences_transferables": ["<max 3 éléments>"],
+      "alerte_humaine": "<alerte factuelle ou chaîne vide>",
+      "justification": "<2-4 phrases factuelles>"
+    }}
+  ]
 }}
 """
-            ai = appel_ia(prompt)
-            ai_used = bool(ai)
-            if not ai_used:
-                # Une panne du fournisseur ne doit pas consommer 5 quotas ni
-                # produire 5 erreurs identiques pendant le même matching.
-                ai_enabled_for_run = False
-            ai = ai or {}
-            for key in ("profil_humain", "traits_dominants", "competences_transferables", "alerte_humaine", "justification"):
-                if key in ai:
-                    result[key] = ai[key]
-            for key in ("score_empathie", "score_soft_skills"):
-                if key in ai:
+        ai_payload = appel_ia(prompt) or {}
+        analyses = ai_payload.get("analyses", []) if isinstance(ai_payload, dict) else []
+        if isinstance(analyses, list):
+            by_id = {str(r["intervenant_id"]): r for r in results}
+            for analysis in analyses:
+                if not isinstance(analysis, dict):
+                    continue
+                target = by_id.get(str(analysis.get("intervenant_id", "")))
+                if not target:
+                    continue
+                target["ai_used"] = True
+                for key in ("profil_humain", "traits_dominants", "competences_transferables", "alerte_humaine", "justification"):
+                    if key in analysis:
+                        target[key] = analysis[key]
+                for key in ("score_empathie", "score_soft_skills"):
+                    value = analysis.get(key)
+                    if value is None:
+                        continue
                     try:
-                        result[key] = max(0, min(100, int(ai[key])))
+                        target[key] = max(0, min(100, int(value)))
                     except (TypeError, ValueError):
                         pass
-        else:
-            ai_used = False
 
-        result["ai_used"] = ai_used
+    # Le score final ne dépend jamais de Gemini : explicable, stable et auditable.
+    return sorted(results, key=lambda x: x["score_global"], reverse=True)
 
-        # Le score final est TOUJOURS calculé en Python. En mode dégradé,
-        # le classement reste 100 % objectif au lieu d'injecter de faux 50/100 IA.
-        if ai_used:
-            empathie = result.get("score_empathie")
-            soft_skills = result.get("score_soft_skills")
-            # Une réponse IA partielle ne crée pas de pseudo-note : les
-            # dimensions absentes sont simplement ignorées et le poids est
-            # renormalisé sur les données réellement disponibles.
-            components = [(item["score_objectif"], 0.70)]
-            if isinstance(empathie, int):
-                components.append((empathie, 0.15))
-            if isinstance(soft_skills, int):
-                components.append((soft_skills, 0.15))
-            denom = sum(weight for _, weight in components)
-            result["score_global"] = round(sum(value * weight for value, weight in components) / denom)
-        else:
-            result["score_global"] = item["score_objectif"]
-        enriched.append(result)
-
-    return sorted(enriched, key=lambda x: x["score_global"], reverse=True)
