@@ -48,6 +48,25 @@ chiffrer_mdp_mail = core.chiffrer_mdp_mail
 
 logger = logging.getLogger("omnicoord.ui")
 
+
+def _split_experience_softskills(value):
+    """Sépare le parcours des observations soft skills stockées historiquement dans le même champ."""
+    text = str(value or "")
+    marker = "[SOFT SKILLS / PERSONNALITÉ] :"
+    if marker in text:
+        parcours, soft = text.split(marker, 1)
+        return parcours.strip(), soft.strip()
+    return text.strip(), ""
+
+
+def _experience_with_softskills(parcours, soft_skills):
+    parcours = (parcours or "").strip()
+    soft_skills = (soft_skills or "").strip()
+    if soft_skills:
+        return f"{parcours}\n\n[SOFT SKILLS / PERSONNALITÉ] : {soft_skills}".strip()
+    return parcours
+
+
 def render():
     SID = st.session_state["structure_id"]
     USER_ID = st.session_state["user_id"]
@@ -295,6 +314,8 @@ def render():
             df_interv = sb_select("intervenants", {"structure_id": SID}, order="date_ajout")
             if not df_interv.empty and "deleted_at" in df_interv.columns:
                 df_interv = df_interv[df_interv["deleted_at"].isna()]
+            # Chargement unique des habilitations : évite une requête Supabase par fiche.
+            df_habs_vivier = sb_select("habilitations", {"structure_id": SID})
             col_f1, col_f2 = st.columns(2)
             filtre_type = col_f1.selectbox("Statut", ["Tous", "Interne", "Vivier candidat", "Externe ponctuel"])
             filtre_dispo = col_f2.selectbox("Disponibilité", ["Toutes", "Disponible", "En mission", "Indisponible"])
@@ -328,22 +349,53 @@ def render():
                     """, unsafe_allow_html=True)
 
                     with st.expander(f"Détails / actions — {row['prenom']} {row['nom']}"):
-                        col_a, col_b = st.columns(2)
-                        with col_a:
-                            nouveau_statut = st.selectbox(
-                                "Disponibilité", ["Disponible", "En mission", "Indisponible"],
-                                index=["Disponible","En mission","Indisponible"].index(row["statut_dispo"]) if row["statut_dispo"] in ["Disponible","En mission","Indisponible"] else 0,
-                                key=f"dispo_{row['id']}"
-                            )
-                            if st.button("Mettre à jour", key=f"maj_{row['id']}"):
-                                if sb_update("intervenants", {"statut_dispo": nouveau_statut}, "id", row["id"]):
-                                    audit("UPDATE_INTERVENANT", "intervenants", str(row["id"]), {"statut_dispo": nouveau_statut})
-                                    st.success("Statut mis à jour.")
-                                    st.rerun()
-                        with col_b:
+                        tab_profil_i, tab_habs_i = st.tabs(["✏️ Modifier la fiche", "🎓 Habilitations & conformité"])
+
+                        with tab_profil_i:
+                            parcours_actuel, soft_actuel = _split_experience_softskills(row.get("experience_texte"))
+                            with st.form(f"edit_intervenant_{row['id']}"):
+                                e1, e2 = st.columns(2)
+                                with e1:
+                                    e_nom = st.text_input("Nom *", value=str(row.get("nom") or ""), key=f"enom_{row['id']}")
+                                    e_prenom = st.text_input("Prénom *", value=str(row.get("prenom") or ""), key=f"eprenom_{row['id']}")
+                                    e_tel = st.text_input("Téléphone", value=str(row.get("telephone") or ""), key=f"etel_{row['id']}")
+                                    e_email = st.text_input("Email", value=str(row.get("email") or ""), key=f"eemail_{row['id']}")
+                                    statuts_i = ["Interne", "Vivier candidat", "Externe ponctuel"]
+                                    e_type = st.selectbox("Statut", statuts_i, index=statuts_i.index(row.get("type_statut")) if row.get("type_statut") in statuts_i else 0, key=f"etype_{row['id']}")
+                                    dispos_i = ["Disponible", "En mission", "Indisponible"]
+                                    e_dispo = st.selectbox("Disponibilité", dispos_i, index=dispos_i.index(row.get("statut_dispo")) if row.get("statut_dispo") in dispos_i else 0, key=f"edispo_{row['id']}")
+                                with e2:
+                                    e_comp = st.text_area("Compétences / gestes techniques", value=str(row.get("competences") or ""), key=f"ecomp_{row['id']}")
+                                    e_parcours = st.text_area("Parcours professionnel", value=parcours_actuel, key=f"eparcours_{row['id']}")
+                                    e_zone = st.text_input("Zone géographique", value=str(row.get("zone_geo") or ""), key=f"ezone_{row['id']}")
+                                    e_disponibilites = st.text_input("Disponibilités détaillées", value=str(row.get("disponibilites") or ""), key=f"edetailsdispo_{row['id']}")
+                                    sources_i = ["Vivier interne","CVthèque","Annonce","Réseau / cooptation","Candidature spontanée"]
+                                    source_actuelle = row.get("source") if row.get("source") in sources_i else "Vivier interne"
+                                    e_source = st.selectbox("Source", sources_i, index=sources_i.index(source_actuelle), key=f"esource_{row['id']}")
+                                e_soft = st.text_area("Observations personnalité / soft skills", value=soft_actuel, key=f"esoft_{row['id']}")
+                                save_i = st.form_submit_button("💾 Enregistrer les modifications")
+
+                            if save_i:
+                                if not e_nom.strip() or not e_prenom.strip():
+                                    st.error("Le nom et le prénom sont obligatoires.")
+                                else:
+                                    payload_i = {
+                                        "nom": e_nom.strip(), "prenom": e_prenom.strip(),
+                                        "telephone": e_tel.strip(), "email": e_email.strip(),
+                                        "type_statut": e_type, "statut_dispo": e_dispo,
+                                        "competences": e_comp.strip(),
+                                        "experience_texte": _experience_with_softskills(e_parcours, e_soft),
+                                        "zone_geo": e_zone.strip(), "disponibilites": e_disponibilites.strip(),
+                                        "source": e_source,
+                                    }
+                                    if sb_update("intervenants", payload_i, "id", row["id"]):
+                                        audit("UPDATE_INTERVENANT", "intervenants", str(row["id"]), {"champs": list(payload_i.keys())})
+                                        st.success("Fiche intervenant mise à jour.")
+                                        st.rerun()
+
+                            st.markdown("---")
                             confirm_archive = st.checkbox(
-                                "Confirmer le retrait du vivier",
-                                key=f"confirm_del_{row['id']}",
+                                "Confirmer le retrait du vivier", key=f"confirm_del_{row['id']}",
                                 help="La fiche est archivée pour préserver l'historique des interventions ; elle disparaît des listes actives.",
                             )
                             if st.button("🗑️ Archiver / retirer", key=f"del_{row['id']}", disabled=not confirm_archive):
@@ -351,9 +403,76 @@ def render():
                                     audit("ARCHIVE_INTERVENANT", "intervenants", str(row["id"]))
                                     st.success("Intervenant archivé et retiré du vivier actif.")
                                     st.rerun()
-                        st.write(f"**Parcours :** {row.get('experience_texte') or 'Non renseigné'}")
-                        st.write(f"**Disponibilités :** {row.get('disponibilites') or 'Non renseigné'}")
-                        st.write(f"**Contact :** {row.get('telephone') or ''} — {row.get('email') or ''}")
+
+                        with tab_habs_i:
+                            hab_types = ["Diplôme AES","DEAES","PSC1 / SST","Permis B","Visite médecine du travail","Habilitation gestes et postures","AFGSU","Autre"]
+                            hab_i = pd.DataFrame()
+                            if not df_habs_vivier.empty and "intervenant_id" in df_habs_vivier.columns:
+                                hab_i = df_habs_vivier[df_habs_vivier["intervenant_id"].astype(str) == str(row["id"])].copy()
+
+                            if hab_i.empty:
+                                st.info("Aucune habilitation enregistrée pour cet intervenant. Vous pouvez en ajouter une maintenant ou plus tard.")
+                            else:
+                                st.caption("Historique des habilitations. Un renouvellement crée une nouvelle ligne afin de conserver la trace de l'ancienne.")
+                                hab_i["_date_exp"] = pd.to_datetime(hab_i["date_expiration"], errors="coerce").dt.date
+                                hab_i = hab_i.sort_values(["type_habilitation", "date_obtention"], ascending=[True, False])
+                                for _, hb in hab_i.iterrows():
+                                    d_exp = hb.get("_date_exp")
+                                    if pd.isna(d_exp) or d_exp == NO_EXPIRY_DATE:
+                                        statut_h = "🟢 Valide sans expiration"
+                                    elif d_exp < datetime.date.today():
+                                        statut_h = f"🔴 Expirée le {d_exp.strftime('%d/%m/%Y')}"
+                                    elif d_exp <= datetime.date.today() + datetime.timedelta(days=60):
+                                        statut_h = f"🟠 Valide jusqu'au {d_exp.strftime('%d/%m/%Y')}"
+                                    else:
+                                        statut_h = f"🟢 Valide jusqu'au {d_exp.strftime('%d/%m/%Y')}"
+                                    with st.expander(f"{hb.get('type_habilitation','Habilitation')} — {statut_h}"):
+                                        st.write(f"Date d'obtention : {hb.get('date_obtention') or 'Non renseignée'}")
+                                        correction = st.checkbox("Corriger cette saisie", key=f"corr_h_{hb['id']}")
+                                        if correction:
+                                            with st.form(f"corr_hab_{hb['id']}"):
+                                                tcur = hb.get("type_habilitation") if hb.get("type_habilitation") in hab_types else "Autre"
+                                                c_type = st.selectbox("Type", hab_types, index=hab_types.index(tcur), key=f"ct_{hb['id']}")
+                                                obt0 = pd.to_datetime(hb.get("date_obtention"), errors="coerce")
+                                                obt0 = obt0.date() if pd.notna(obt0) else datetime.date.today()
+                                                c_obt = st.date_input("Date d'obtention", value=obt0, key=f"co_{hb['id']}")
+                                                sans_exp0 = pd.isna(d_exp) or d_exp == NO_EXPIRY_DATE
+                                                c_sans = st.checkbox("Valide sans date d'expiration", value=sans_exp0, key=f"cs_{hb['id']}")
+                                                exp0 = (datetime.date.today() + datetime.timedelta(days=365)) if sans_exp0 or pd.isna(d_exp) else d_exp
+                                                c_exp = None if c_sans else st.date_input("Date d'expiration", value=exp0, key=f"ce_{hb['id']}")
+                                                if st.form_submit_button("💾 Corriger"):
+                                                    if c_exp is not None and c_exp <= c_obt:
+                                                        st.error("La date d'expiration doit être après la date d'obtention.")
+                                                    else:
+                                                        p_h = {"type_habilitation": c_type, "date_obtention": c_obt.isoformat(), "date_expiration": NO_EXPIRY_DATE.isoformat() if c_sans else c_exp.isoformat()}
+                                                        if sb_update("habilitations", p_h, "id", hb["id"]):
+                                                            audit("UPDATE_HABILITATION", "habilitations", str(hb["id"]))
+                                                            st.success("Saisie corrigée.")
+                                                            st.rerun()
+
+                            st.markdown("#### ➕ Ajouter / renouveler une habilitation")
+                            mode_key = f"new_hab_mode_{row['id']}"
+                            mode_h = st.radio("Validité", ["Avec date d'expiration", "Valide sans date d'expiration"], horizontal=True, key=mode_key)
+                            with st.form(f"add_hab_interv_{row['id']}", clear_on_submit=True):
+                                n_type = st.selectbox("Type d'habilitation", hab_types, key=f"nt_{row['id']}")
+                                n_obt = st.date_input("Date d'obtention", value=datetime.date.today(), key=f"no_{row['id']}")
+                                n_exp = None
+                                if mode_h == "Avec date d'expiration":
+                                    n_exp = st.date_input("Date d'expiration", value=datetime.date.today() + datetime.timedelta(days=365), key=f"ne_{row['id']}")
+                                add_h = st.form_submit_button("➕ Ajouter à la fiche")
+                            if add_h:
+                                if n_exp is not None and n_exp <= n_obt:
+                                    st.error("La date d'expiration doit être après la date d'obtention.")
+                                else:
+                                    new_h = sb_insert("habilitations", {
+                                        "structure_id": SID, "intervenant_id": str(row["id"]),
+                                        "type_habilitation": n_type, "date_obtention": n_obt.isoformat(),
+                                        "date_expiration": n_exp.isoformat() if n_exp is not None else NO_EXPIRY_DATE.isoformat(),
+                                    })
+                                    if new_h:
+                                        audit("CREATE_HABILITATION", "habilitations", new_h.get("id"), {"intervenant_id": str(row["id"])})
+                                        st.success("Habilitation ajoutée à la fiche. Le moteur de matching la prendra en compte automatiquement.")
+                                        st.rerun()
 
         with tab_ajout:
             with st.form("form_ajout_interv", clear_on_submit=True):
@@ -768,74 +887,74 @@ def render():
                     """, unsafe_allow_html=True)
 
                     with st.expander(f"📋 Fiche — {row['prenom']} {row['nom']}"):
-                        c1, c2 = st.columns(2)
-                        with c1:
-                            st.markdown(f"""
-                                <div class="fiche-section">
-                                    <h4>📍 Coordonnées</h4>
+                        tab_vue_b, tab_edit_b = st.tabs(["👁️ Synthèse", "✏️ Modifier la fiche"])
+                        with tab_vue_b:
+                            c1, c2 = st.columns(2)
+                            with c1:
+                                st.markdown(f"""
+                                    <div class="fiche-section"><h4>📍 Coordonnées</h4>
                                     <div class="fiche-row"><span class="fiche-label">Adresse</span><span class="fiche-value">{h(row['adresse']) or '—'}</span></div>
                                     <div class="fiche-row"><span class="fiche-label">Téléphone</span><span class="fiche-value">{h(row['telephone']) or '—'}</span></div>
-                                    <div class="fiche-row"><span class="fiche-label">GIR</span><span class="fiche-value">{h(row['niveau_dependance']) or '—'}</span></div>
-                                </div>
-                                <div class="fiche-section">
-                                    <h4>🚨 Contact d'urgence</h4>
+                                    <div class="fiche-row"><span class="fiche-label">GIR</span><span class="fiche-value">{h(row['niveau_dependance']) or '—'}</span></div></div>
+                                    <div class="fiche-section"><h4>🚨 Contact d'urgence</h4>
                                     <div class="fiche-row"><span class="fiche-label">Nom</span><span class="fiche-value">{h(row.get('contact_urgence_nom','')) or '—'}</span></div>
-                                    <div class="fiche-row"><span class="fiche-label">Tél.</span><span class="fiche-value">{h(row.get('contact_urgence_tel','')) or '—'}</span></div>
-                                </div>
-                            """, unsafe_allow_html=True)
-                        with c2:
-                            st.markdown(f"""
-                                <div class="fiche-section">
-                                    <h4>🔄 Besoins récurrents</h4>
-                                    <div class="fiche-value">{h(row.get('besoins_recurrents','')) or '—'}</div>
-                                </div>
-                                <div class="fiche-section">
-                                    <h4>🧑‍⚕️ Intervenant attitré</h4>
-                                    <div class="fiche-value" style="font-size:15px; font-weight:600;">{attitré}</div>
-                                </div>
-                            """, unsafe_allow_html=True)
+                                    <div class="fiche-row"><span class="fiche-label">Tél.</span><span class="fiche-value">{h(row.get('contact_urgence_tel','')) or '—'}</span></div></div>
+                                """, unsafe_allow_html=True)
+                            with c2:
+                                st.markdown(f"""
+                                    <div class="fiche-section"><h4>🔄 Besoins récurrents</h4><div class="fiche-value">{h(row.get('besoins_recurrents','')) or '—'}</div></div>
+                                    <div class="fiche-section"><h4>🛠️ Gestes techniques</h4><div class="fiche-value">{h(row.get('gestes_techniques','')) or '—'}</div></div>
+                                    <div class="fiche-section"><h4>🕐 Besoins horaires</h4><div class="fiche-value">{h(row.get('besoins_horaires','')) or '—'}</div></div>
+                                    <div class="fiche-section"><h4>🧑‍⚕️ Intervenant attitré</h4><div class="fiche-value">{attitré}</div></div>
+                                """, unsafe_allow_html=True)
 
-                        st.markdown("<br>", unsafe_allow_html=True)
-                        cx, cy, cz = st.columns(3)
-                        with cx:
-                            nv_statut = st.selectbox("Statut", ["Actif","Inactif","Décédé"],
-                                                      index=["Actif","Inactif","Décédé"].index(row["statut"]) if row["statut"] in ["Actif","Inactif","Décédé"] else 0,
-                                                      key=f"sb_{row['id']}")
-                            if st.button("Mettre à jour", key=f"upd_b_{row['id']}"):
-                                sb_update("beneficiaires", {"statut": nv_statut}, "id", row["id"])
-                                st.rerun()
-                        with cy:
-                            opts_i = {"Non défini": None}
-                            opts_i.update({v: k for k, v in interv_map.items()})
-                            if st.button("Définir attitré", key=f"att_{row['id']}"):
-                                pass  # handled below
-                            sel_att = st.selectbox("Attitré", list(opts_i.keys()), key=f"sel_att_{row['id']}")
-                            if st.button("💾 Enregistrer attitré", key=f"save_att_{row['id']}"):
-                                sb_update("beneficiaires", {"intervenant_attitré_id": opts_i[sel_att]}, "id", row["id"])
-                                st.rerun()
-                        with cz:
-                            # Export RGPD
-                            if st.button("📥 Export RGPD", key=f"rgpd_{row['id']}"):
+                            if st.button("📥 Préparer export RGPD", key=f"rgpd_{row['id']}"):
                                 df_iv_b = sb_select("interventions", {"structure_id": SID, "beneficiaire_id": str(row["id"])})
                                 df_doc_b = sb_select("documents_transmissions", {"structure_id": SID, "beneficiaire_id": str(row["id"])})
-                                pdf_bytes = creer_pdf_export_rgpd(
-                                    row.to_dict(),
-                                    df_iv_b.to_dict("records") if not df_iv_b.empty else [],
-                                    df_doc_b.to_dict("records") if not df_doc_b.empty else []
-                                )
+                                st.session_state[f"rgpd_pdf_{row['id']}"] = creer_pdf_export_rgpd(row.to_dict(), df_iv_b.to_dict("records") if not df_iv_b.empty else [], df_doc_b.to_dict("records") if not df_doc_b.empty else [])
                                 audit("EXPORT_RGPD", "beneficiaires", str(row["id"]))
-                                st.download_button(
-                                    "⬇️ Télécharger le dossier RGPD",
-                                    data=pdf_bytes,
-                                    file_name=f"dossier_RGPD_{row['nom']}_{row['prenom']}.pdf",
-                                    mime="application/pdf",
-                                    key=f"dl_rgpd_{row['id']}"
-                                )
-                            confirm_b = st.checkbox(
-                                "Confirmer l'archivage",
-                                key=f"confirm_del_b_{row['id']}",
-                                help="La fiche est retirée des listes actives mais l'historique est conservé.",
-                            )
+                            if st.session_state.get(f"rgpd_pdf_{row['id']}"):
+                                st.download_button("⬇️ Télécharger le dossier RGPD", data=st.session_state[f"rgpd_pdf_{row['id']}"], file_name=f"dossier_RGPD_{row['nom']}_{row['prenom']}.pdf", mime="application/pdf", key=f"dl_rgpd_{row['id']}")
+
+                        with tab_edit_b:
+                            with st.form(f"edit_benef_{row['id']}"):
+                                b1, b2 = st.columns(2)
+                                with b1:
+                                    eb_nom = st.text_input("Nom *", value=str(row.get("nom") or ""), key=f"bn_{row['id']}")
+                                    eb_prenom = st.text_input("Prénom *", value=str(row.get("prenom") or ""), key=f"bp_{row['id']}")
+                                    eb_adresse = st.text_input("Adresse", value=str(row.get("adresse") or ""), key=f"ba_{row['id']}")
+                                    eb_tel = st.text_input("Téléphone", value=str(row.get("telephone") or ""), key=f"bt_{row['id']}")
+                                    girs = ["GIR 1","GIR 2","GIR 3","GIR 4","GIR 5","GIR 6","Non évalué"]
+                                    gir_cur = row.get("niveau_dependance") if row.get("niveau_dependance") in girs else "Non évalué"
+                                    eb_gir = st.selectbox("GIR", girs, index=girs.index(gir_cur), key=f"bg_{row['id']}")
+                                    statuts_b = ["Actif","Inactif","Décédé"]
+                                    stat_cur = row.get("statut") if row.get("statut") in statuts_b else "Actif"
+                                    eb_statut = st.selectbox("Statut", statuts_b, index=statuts_b.index(stat_cur), key=f"bs_{row['id']}")
+                                with b2:
+                                    eb_cnom = st.text_input("Contact d'urgence (nom + lien)", value=str(row.get("contact_urgence_nom") or ""), key=f"bcn_{row['id']}")
+                                    eb_ctel = st.text_input("Tél. contact d'urgence", value=str(row.get("contact_urgence_tel") or ""), key=f"bct_{row['id']}")
+                                    eb_besoins = st.text_area("Besoins récurrents", value=str(row.get("besoins_recurrents") or ""), key=f"bb_{row['id']}")
+                                    eb_gestes = st.text_area("Gestes techniques requis", value=str(row.get("gestes_techniques") or ""), key=f"bgest_{row['id']}")
+                                    eb_horaires = st.text_input("Besoins horaires", value=str(row.get("besoins_horaires") or ""), key=f"bh_{row['id']}")
+                                    eb_notes = st.text_area("Notes", value=str(row.get("notes") or ""), key=f"bnotes_{row['id']}")
+                                opts_i = {"Non défini": None}
+                                opts_i.update({v: k for k, v in interv_map.items()})
+                                current_att_id = str(row.get("intervenant_attitré_id") or "")
+                                current_att_label = next((lbl for lbl, iid in opts_i.items() if str(iid or "") == current_att_id), "Non défini")
+                                eb_att = st.selectbox("Intervenant attitré", list(opts_i.keys()), index=list(opts_i.keys()).index(current_att_label), key=f"batt_{row['id']}")
+                                save_b = st.form_submit_button("💾 Enregistrer les modifications")
+                            if save_b:
+                                if not eb_nom.strip() or not eb_prenom.strip():
+                                    st.error("Le nom et le prénom sont obligatoires.")
+                                else:
+                                    p_b = {"nom": eb_nom.strip(), "prenom": eb_prenom.strip(), "adresse": eb_adresse.strip(), "telephone": eb_tel.strip(), "niveau_dependance": eb_gir, "statut": eb_statut, "contact_urgence_nom": eb_cnom.strip(), "contact_urgence_tel": eb_ctel.strip(), "besoins_recurrents": eb_besoins.strip(), "gestes_techniques": eb_gestes.strip(), "besoins_horaires": eb_horaires.strip(), "notes": eb_notes.strip(), "intervenant_attitré_id": opts_i[eb_att]}
+                                    if sb_update("beneficiaires", p_b, "id", row["id"]):
+                                        audit("UPDATE_BENEFICIAIRE", "beneficiaires", str(row["id"]), {"champs": list(p_b.keys())})
+                                        st.success("Fiche bénéficiaire mise à jour.")
+                                        st.rerun()
+
+                            st.markdown("---")
+                            confirm_b = st.checkbox("Confirmer l'archivage", key=f"confirm_del_b_{row['id']}", help="La fiche est retirée des listes actives mais l'historique est conservé.")
                             if st.button("🗑️ Archiver / retirer", key=f"del_b_{row['id']}", disabled=not confirm_b):
                                 if sb_update("beneficiaires", {"deleted_at": datetime.datetime.utcnow().isoformat(), "statut": "Inactif"}, "id", row["id"]):
                                     audit("ARCHIVE_BENEFICIAIRE", "beneficiaires", str(row["id"]))
