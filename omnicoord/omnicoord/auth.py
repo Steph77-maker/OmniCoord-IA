@@ -38,8 +38,6 @@ def _load_authenticated_profile(user_id: str) -> tuple[dict | None, str]:
 def check_password() -> bool:
     if st.session_state.get("password_correct", False):
         # Évite un aller-retour Supabase à CHAQUE clic/navigation Streamlit.
-        # La session JWT est revérifiée au maximum une fois par minute ; le logout
-        # reste immédiat puisqu'il efface le session_state et appelle sign_out().
         now = time.monotonic()
         last_verified = float(st.session_state.get("_auth_last_verified", 0.0) or 0.0)
         if now - last_verified < 60:
@@ -53,8 +51,10 @@ def check_password() -> bool:
         for key in ["password_correct", "user_id", "is_admin", "structure_id", "_auth_last_verified"]:
             st.session_state.pop(key, None)
 
-    # Un placeholder unique évite le "double affichage" visuel pendant le rerun
-    # qui suit une connexion réussie (notamment lorsqu'on valide avec Entrée).
+    # Toute l'interface de connexion vit dans un placeholder unique.
+    # Au submit, on l'efface AVANT tout appel réseau : ainsi, pendant la
+    # vérification Supabase, Streamlit ne peut pas afficher simultanément
+    # l'ancien formulaire grisé et un nouveau formulaire actif.
     login_screen = st.empty()
     with login_screen.container():
         st.markdown(
@@ -66,80 +66,91 @@ def check_password() -> bool:
             """,
             unsafe_allow_html=True,
         )
-
         _, col2, _ = st.columns([1, 1.2, 1])
         with col2:
-            with st.form("form_login"):
-                email_saisi = st.text_input("Email")
-                pwd_saisi = st.text_input("Mot de passe", type="password")
-                submit = st.form_submit_button("Se connecter")
+            with st.form("form_login", clear_on_submit=False):
+                email_saisi = st.text_input("Email", key="login_email")
+                pwd_saisi = st.text_input("Mot de passe", type="password", key="login_password")
+                submit = st.form_submit_button("Se connecter", use_container_width=False)
 
-                if submit:
-                    email_saisi = email_saisi.strip().lower()
-                    if est_bloque(email_saisi):
-                        st.error("⛔ Trop de tentatives. Réessayez plus tard.")
-                        return False
+    if not submit:
+        return False
 
-                    try:
-                        # Réinitialise un éventuel client anonyme résiduel avant login.
-                        reset_user_client()
-                        client = get_supabase()
-                        res = client.auth.sign_in_with_password({
-                            "email": email_saisi,
-                            "password": pwd_saisi,
-                        })
-                        user = res.user
-                        if not user:
-                            enregistrer_tentative(email_saisi, False)
-                            st.error("Email ou mot de passe incorrect.")
-                            return False
+    # Important : effacer le formulaire immédiatement, avant est_bloque() et
+    # sign_in_with_password(), qui sont des appels réseau et peuvent prendre
+    # quelques secondes sur Streamlit Cloud.
+    login_screen.empty()
+    progress = st.empty()
+    with progress.container():
+        _, col2, _ = st.columns([1, 1.2, 1])
+        with col2:
+            st.info("Connexion en cours…")
 
-                        profil, structure_nom = _load_authenticated_profile(str(user.id))
-                        if not profil:
-                            enregistrer_tentative(email_saisi, False)
-                            client.auth.sign_out()
-                            st.error("Profil introuvable. Contactez l'administrateur.")
-                            return False
+    email_saisi = email_saisi.strip().lower()
+    if est_bloque(email_saisi):
+        progress.empty()
+        st.error("⛔ Trop de tentatives. Réessayez plus tard.")
+        return False
 
-                        date_fin_raw = profil.get("date_fin_essai")
-                        if date_fin_raw and not profil.get("est_admin", False):
-                            date_fin = datetime.date.fromisoformat(str(date_fin_raw))
-                            if datetime.date.today() > date_fin:
-                                enregistrer_tentative(email_saisi, False)
-                                client.auth.sign_out()
-                                st.error("Votre période d'accès a expiré. Contactez l'administrateur.")
-                                return False
+    try:
+        reset_user_client()
+        client = get_supabase()
+        res = client.auth.sign_in_with_password({
+            "email": email_saisi,
+            "password": pwd_saisi,
+        })
+        user = res.user
+        if not user:
+            enregistrer_tentative(email_saisi, False)
+            progress.empty()
+            st.error("Email ou mot de passe incorrect.")
+            return False
 
-                        enregistrer_tentative(email_saisi, True)
-                        st.session_state.update({
-                            "password_correct": True,
-                            "user_id": str(user.id),
-                            "user_email": email_saisi,
-                            "is_admin": bool(profil.get("est_admin", False)),
-                            "structure_id": profil.get("structure_id"),
-                            "structure_nom": structure_nom,
-                            "statut_abonnement": profil.get("statut_abonnement", "ESSAI"),
-                            "quota_max_ia": profil.get("quota_max_ia", 0),
-                            "_auth_last_verified": time.monotonic(),
-                            # Aucun mot de passe SMTP déchiffré n'est conservé en session.
-                            "mail_config": {
-                                "email": profil.get("mail_smtp_email", ""),
-                                "imap": profil.get("mail_imap_server", "imap.gmail.com"),
-                            },
-                        })
-                        audit("LOGIN", "profils", str(user.id))
+        profil, structure_nom = _load_authenticated_profile(str(user.id))
+        if not profil:
+            enregistrer_tentative(email_saisi, False)
+            client.auth.sign_out()
+            progress.empty()
+            st.error("Profil introuvable. Contactez l'administrateur.")
+            return False
 
-                        # Efface le formulaire et poursuit le rendu dans CE run.
-                        # Évite le "ghost" visuel du formulaire pendant un st.rerun().
-                        login_screen.empty()
-                        return True
+        date_fin_raw = profil.get("date_fin_essai")
+        if date_fin_raw and not profil.get("est_admin", False):
+            date_fin = datetime.date.fromisoformat(str(date_fin_raw))
+            if datetime.date.today() > date_fin:
+                enregistrer_tentative(email_saisi, False)
+                client.auth.sign_out()
+                progress.empty()
+                st.error("Votre période d'accès a expiré. Contactez l'administrateur.")
+                return False
 
-                    except Exception as exc:
-                        enregistrer_tentative(email_saisi, False)
-                        err_msg = str(exc)
-                        if "Invalid login" in err_msg or "credentials" in err_msg.lower():
-                            st.error("Email ou mot de passe incorrect.")
-                        else:
-                            logger.exception("Login error")
-                            st.error("Erreur de connexion. Réessayez.")
-    return False
+        enregistrer_tentative(email_saisi, True)
+        st.session_state.update({
+            "password_correct": True,
+            "user_id": str(user.id),
+            "user_email": email_saisi,
+            "is_admin": bool(profil.get("est_admin", False)),
+            "structure_id": profil.get("structure_id"),
+            "structure_nom": structure_nom,
+            "statut_abonnement": profil.get("statut_abonnement", "ESSAI"),
+            "quota_max_ia": profil.get("quota_max_ia", 0),
+            "_auth_last_verified": time.monotonic(),
+            "mail_config": {
+                "email": profil.get("mail_smtp_email", ""),
+                "imap": profil.get("mail_imap_server", "imap.gmail.com"),
+            },
+        })
+        audit("LOGIN", "profils", str(user.id))
+        progress.empty()
+        return True
+
+    except Exception as exc:
+        enregistrer_tentative(email_saisi, False)
+        progress.empty()
+        err_msg = str(exc)
+        if "Invalid login" in err_msg or "credentials" in err_msg.lower():
+            st.error("Email ou mot de passe incorrect.")
+        else:
+            logger.exception("Login error")
+            st.error("Erreur de connexion. Réessayez.")
+        return False
