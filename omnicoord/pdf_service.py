@@ -2,7 +2,34 @@
 import datetime
 from fpdf import FPDF
 
+
+def _pdf_safe(value) -> str:
+    """Convertit le texte en caractères sûrs pour les polices PDF core Latin-1.
+
+    Les accents français sont conservés. Les ponctuations/emoji Unicode non pris
+    en charge par Helvetica sont remplacés pour empêcher un export de planter.
+    """
+    text = "" if value is None else str(value)
+    replacements = {
+        "—": "-", "–": "-", "−": "-",
+        "“": '"', "”": '"', "„": '"',
+        "’": "'", "‘": "'", "…": "...",
+        "•": "-", "✦": "-", "█": "#", "░": ".",
+        "⚠": "ATTENTION", "💡": "INFO",
+        "🛠️": "", "🎓": "", "❤️": "", "🧠": "", "📍": "",
+    }
+    for src, dst in replacements.items():
+        text = text.replace(src, dst)
+    return text.encode("latin-1", errors="replace").decode("latin-1")
+
+
 class PDFDocument(FPDF):
+    def cell(self, w=None, h=None, text="", *args, **kwargs):
+        return super().cell(w, h, _pdf_safe(text), *args, **kwargs)
+
+    def multi_cell(self, w, h=None, text="", *args, **kwargs):
+        return super().multi_cell(w, h, _pdf_safe(text), *args, **kwargs)
+
     def header(self):
         self.set_font("Helvetica", "B", 14)
         self.set_text_color(15, 41, 66)

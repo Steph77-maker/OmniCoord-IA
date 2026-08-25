@@ -6,7 +6,7 @@ import logging
 import math
 from typing import Any
 
-import google.generativeai as genai
+from google import genai
 import streamlit as st
 
 from .database import get_supabase, get_supabase_admin, current_authenticated_user_id
@@ -15,13 +15,12 @@ logger = logging.getLogger("omnicoord.ai")
 
 try:
     gemini_key = st.secrets["GEMINI_API_KEY"]
-    genai.configure(api_key=gemini_key)
-    GEMINI_MODEL = st.secrets.get("GEMINI_MODEL", "gemini-2.5-flash")
-    model = genai.GenerativeModel(GEMINI_MODEL)
+    GEMINI_MODEL = str(st.secrets.get("GEMINI_MODEL", "gemini-3.6-flash")).strip() or "gemini-3.6-flash"
+    gemini_client = genai.Client(api_key=gemini_key)
     IA_DISPONIBLE = True
 except Exception:
     IA_DISPONIBLE = False
-    model = None
+    gemini_client = None
 
 
 def _normalize_quota_payload(data: Any) -> dict:
@@ -102,7 +101,7 @@ def incrementer_quota_ia():
 
 
 def _generate(prompt: str) -> str | None:
-    if not IA_DISPONIBLE or model is None:
+    if not IA_DISPONIBLE or gemini_client is None:
         st.error("Clé API Gemini non configurée.")
         return None
 
@@ -112,7 +111,7 @@ def _generate(prompt: str) -> str | None:
         return None
 
     try:
-        response = model.generate_content(prompt)
+        response = gemini_client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
         text = (response.text or "").strip()
         if not text:
             raise ValueError("Réponse IA vide")
