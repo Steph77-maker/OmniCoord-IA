@@ -11,6 +11,12 @@ import streamlit as st
 from . import core
 from .matching_service import match_beneficiary
 from .planning_service import ensure_no_intervenant_conflict
+from .replacement_service import (
+    encode_required_habilitations,
+    required_habilitations,
+    rank_replacements,
+    validate_replacement_candidate,
+)
 from .exceptions import ValidationError, DatabaseError
 
 # Aliases conservés pour limiter les changements de comportement pendant la migration.
@@ -882,6 +888,16 @@ def render():
             if df_benef3.empty or df_interv3.empty:
                 st.info("Ajoutez au moins un bénéficiaire et un intervenant.")
             else:
+                df_habs_plan = sb_select("habilitations", {"structure_id": SID})
+                hab_catalog = [
+                    "Diplôme AES", "DEAES", "PSC1 / SST", "Permis B",
+                    "Visite médecine du travail", "Habilitation gestes et postures",
+                    "AFGSU", "Autre",
+                ]
+                hab_options = set(hab_catalog)
+                if not df_habs_plan.empty and "type_habilitation" in df_habs_plan.columns:
+                    hab_options.update(df_habs_plan["type_habilitation"].dropna().astype(str).tolist())
+                hab_options = sorted(hab_options)
                 with st.form("form_plan"):
                     c1, c2, c3 = st.columns(3)
                     benef_lbl3 = {f"{r['prenom']} {r['nom']}": str(r["id"]) for _, r in df_benef3.iterrows()}
@@ -893,6 +909,11 @@ def render():
                     date_p = c4.date_input("Date", value=datetime.date.today())
                     hd = c5.time_input("Heure début")
                     hf = c6.time_input("Heure fin")
+                    habs_requises = st.multiselect(
+                        "Habilitations obligatoires pour cette mission",
+                        hab_options,
+                        help="Si une habilitation est sélectionnée, une personne qui ne la possède pas ou dont elle est expirée sera écartée uniquement de cette mission et signalée en conformité.",
+                    )
                     notes_p = st.text_input("Notes")
 
                     if st.form_submit_button("Planifier"):
@@ -913,7 +934,7 @@ def render():
                                 "heure_fin": hf.strftime("%H:%M"),
                                 "type_intervention": type_iv,
                                 "statut": "Planifié",
-                                "notes": notes_p
+                                "notes": encode_required_habilitations(notes_p, habs_requises)
                             })
                             if new_iv:
                                 audit("CREATE_INTERVENTION", "interventions", new_iv.get("id"))
@@ -957,84 +978,97 @@ def render():
                                 st.rerun()
 
         with tab_urg:
-            st.caption("🤖 L'agent IA classe les disponibles et sollicite automatiquement en cascade.")
+            st.caption("OmniCoord filtre d'abord les contraintes bloquantes, puis classe les personnes réellement affectables.")
             df_urgs = sb_select("interventions", {"structure_id": SID, "statut": "Urgence à pourvoir"}, order="date_intervention")
 
             if df_urgs.empty:
                 st.success("✅ Aucune urgence en cours.")
             else:
-                benef_noms_u = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_benef3.iterrows()}
+                benef_by_id = {str(r["id"]): r.to_dict() for _, r in df_benef3.iterrows()}
                 for _, urg in df_urgs.iterrows():
-                    b = h(benef_noms_u.get(str(urg.get("beneficiaire_id","")), "Inconnu"))
+                    urg_dict = urg.to_dict()
+                    benef = benef_by_id.get(str(urg.get("beneficiaire_id", "")), {})
+                    b = h(f"{benef.get('prenom', '')} {benef.get('nom', '')}".strip() or "Inconnu")
+                    req = required_habilitations(urg_dict)
+                    req_html = " • ".join(h(x) for x in req) if req else "Aucune habilitation obligatoire déclarée"
                     st.markdown(f"""
                         <div class="oc-card oc-card-alert">
                             <b>🚨 {h(str(urg['date_intervention']))} — {h(str(urg['heure_debut']))} à {h(str(urg['heure_fin']))}</b><br>
-                            {b} • {h(str(urg['type_intervention']))}
+                            {b} • {h(str(urg['type_intervention']))}<br>
+                            <span style="color:#b8c2cc;">🎓 {req_html}</span>
                         </div>
                     """, unsafe_allow_html=True)
 
-                    # Sollicitation active
-                    df_sol = sb_select("sollicitations_urgence", {
-                        "structure_id": SID, "intervention_id": str(urg["id"]), "statut": "En attente"
-                    })
-                    interv_noms_u = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_interv3.iterrows()}
+                    key_results = f"replacement_results_{urg['id']}"
+                    if st.button("🔎 Trouver les meilleurs remplaçants", key=f"find_rep_{urg['id']}"):
+                        try:
+                            with st.spinner("Analyse du vivier et des contraintes..."):
+                                st.session_state[key_results] = rank_replacements(SID, urg_dict, benef, df_interv3)
+                        except DatabaseError:
+                            st.error("Impossible de charger les données nécessaires au remplacement.")
 
-                    if not df_sol.empty:
-                        sol = df_sol.iloc[0]
-                        sol_nom = h(interv_noms_u.get(str(sol.get("intervenant_id","")), "Inconnu"))
-                        st.markdown(f"""
-                            <div class="oc-card oc-card-warning">
-                                🤖 <b>Sollicité :</b> {sol_nom} (score {sol['score_global']}%)<br>
-                                <span style="color:#b8c2cc;">{h(str(sol.get('justification','')))} — ⏳ En attente</span>
-                            </div>
-                        """, unsafe_allow_html=True)
-                        ca, cr = st.columns(2)
-                        if ca.button("✅ A accepté", key=f"acc_{sol['id']}"):
-                            sb_update("sollicitations_urgence", {"statut": "Accepté"}, "id", str(sol["id"]))
-                            sb_update("interventions", {"intervenant_id": str(sol["intervenant_id"]), "statut": "Planifié"}, "id", str(urg["id"]))
-                            st.success("Remplacement confirmé.")
-                            st.rerun()
-                        if cr.button("❌ A refusé → suivant", key=f"ref_{sol['id']}"):
-                            sb_update("sollicitations_urgence", {"statut": "Refusé"}, "id", str(sol["id"]))
-                            st.rerun()
-                    else:
-                        df_dispo_u = sb_select("intervenants", {"structure_id": SID, "statut_dispo": "Disponible"})
-                        if df_dispo_u.empty:
-                            st.warning("Aucun intervenant disponible.")
-                        elif IA_DISPONIBLE:
-                            if st.button("🤖 Lancer l'agent IA", key=f"ia_{urg['id']}"):
-                                classement = classer_candidats_urgence(urg.to_dict(), df_dispo_u)
-                                # Exclure les déjà sollicités
-                                df_deja = sb_select("sollicitations_urgence", {"intervention_id": str(urg["id"]), "structure_id": SID})
-                                ids_excl = set(df_deja["intervenant_id"].tolist()) if not df_deja.empty else set()
-                                candidat = next((c for c in classement if c["intervenant_id"] not in ids_excl), None)
+                    results = st.session_state.get(key_results, [])
+                    eligible = [r for r in results if r.get("eligible")]
+                    blocked = [r for r in results if not r.get("eligible")]
 
-                                if not candidat:
-                                    st.warning("Tous les disponibles ont déjà été sollicités.")
-                                else:
-                                    ok, msg = envoyer_email(
-                                        candidat["intervenant_email"],
-                                        f"Remplacement urgent le {urg['date_intervention']}",
-                                        f"Bonjour,\n\nUne intervention est à pourvoir le {urg['date_intervention']} de {urg['heure_debut']} à {urg['heure_fin']} ({urg['type_intervention']}).\nMerci de confirmer votre disponibilité.\n\nMerci."
+                    if results:
+                        st.markdown("#### ✅ Affectables maintenant")
+                        if not eligible:
+                            st.warning("Aucun intervenant n'est actuellement affectable à cette mission.")
+                        for rank, cand in enumerate(eligible[:5], 1):
+                            cinfo, caction = st.columns([4, 1])
+                            with cinfo:
+                                warnings = cand.get("warnings") or []
+                                warn_html = "<br>".join(f"🟠 {h(w)}" for w in warnings)
+                                st.markdown(f"""
+                                    <div class="oc-card">
+                                        <b>#{rank} — {h(cand['intervenant_nom'])}</b>
+                                        <span class="oc-badge" style="background:#3fae74; margin-left:8px;">{cand['score_global']}%</span><br>
+                                        <span style="color:#b8c2cc;">{h(str(cand.get('type_statut','')))} • {h(str(cand.get('zone_geo','') or 'Zone non précisée'))}</span><br>
+                                        <span style="font-size:13px;">Compétences {cand['score_competences']}% • Zone {cand['score_zone']}%</span>
+                                        {('<br>'+warn_html) if warn_html else ''}
+                                    </div>
+                                """, unsafe_allow_html=True)
+                            with caction:
+                                if st.button("Affecter", key=f"assign_{urg['id']}_{cand['intervenant_id']}", type="primary"):
+                                    try:
+                                        ok, blockers, warnings = validate_replacement_candidate(SID, urg_dict, cand["intervenant_id"])
+                                        if not ok:
+                                            st.error("Affectation refusée : " + " ; ".join(blockers))
+                                        else:
+                                            updated = sb_update(
+                                                "interventions",
+                                                {"intervenant_id": cand["intervenant_id"], "statut": "Planifié"},
+                                                "id",
+                                                str(urg["id"]),
+                                            )
+                                            if updated:
+                                                audit(
+                                                    "ASSIGN_REPLACEMENT",
+                                                    "interventions",
+                                                    str(urg["id"]),
+                                                    {
+                                                        "intervenant_id": cand["intervenant_id"],
+                                                        "score": cand["score_global"],
+                                                        "warnings": warnings,
+                                                    },
+                                                )
+                                                st.session_state.pop(key_results, None)
+                                                st.success(f"✅ {cand['intervenant_nom']} affecté(e). Planning mis à jour.")
+                                                st.rerun()
+                                    except DatabaseError:
+                                        st.error("Impossible de revalider l'affectation. Réessayez.")
+
+                        if blocked:
+                            with st.expander(f"🚫 Écartés pour cette mission ({len(blocked)})"):
+                                st.caption("Ces personnes restent dans le vivier. Elles sont seulement non éligibles à cette intervention.")
+                                for cand in blocked:
+                                    reasons = " • ".join(h(x) for x in cand.get("blockers", []))
+                                    st.markdown(
+                                        f"<div class='oc-card oc-card-warning'><b>{h(cand['intervenant_nom'])}</b> — {h(str(cand.get('type_statut','')))}<br>🚫 {reasons}</div>",
+                                        unsafe_allow_html=True,
                                     )
-                                    if ok:
-                                        sb_insert("sollicitations_urgence", {
-                                            "structure_id": SID,
-                                            "intervention_id": str(urg["id"]),
-                                            "intervenant_id": candidat["intervenant_id"],
-                                            "score_global": int(candidat.get("score_global", 0)),
-                                            "justification": candidat.get("justification", ""),
-                                            "alerte_habilitation": candidat.get("alerte_habilitation", ""),
-                                            "statut": "En attente"
-                                        })
-                                        st.success(f"✅ {candidat['intervenant_nom']} sollicité(e).")
-                                        st.rerun()
-                                    else:
-                                        st.error(msg)
 
-                    if st.button("✅ Pourvu manuellement", key=f"man_{urg['id']}"):
-                        sb_update("interventions", {"statut": "Planifié"}, "id", str(urg["id"]))
-                        st.rerun()
                     st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
 
 
