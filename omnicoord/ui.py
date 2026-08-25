@@ -902,8 +902,11 @@ def render():
                     c1, c2, c3 = st.columns(3)
                     benef_lbl3 = {f"{r['prenom']} {r['nom']}": str(r["id"]) for _, r in df_benef3.iterrows()}
                     interv_lbl3 = {f"{r['prenom']} {r['nom']}": str(r["id"]) for _, r in df_interv3.iterrows()}
-                    benef_p = c1.selectbox("Bénéficiaire", list(benef_lbl3.keys()))
-                    interv_p = c2.selectbox("Intervenant", list(interv_lbl3.keys()))
+
+                    benef_placeholder = "— Sélectionner un bénéficiaire —"
+                    interv_unassigned = "À pourvoir / Non affecté"
+                    benef_p = c1.selectbox("Bénéficiaire", [benef_placeholder] + list(benef_lbl3.keys()), index=0)
+                    interv_p = c2.selectbox("Intervenant", [interv_unassigned] + list(interv_lbl3.keys()), index=0)
                     type_iv = c3.selectbox("Type", ["Aide à la toilette","Aide au repas","Ménage","Accompagnement","Soins","Autre"])
                     c4, c5, c6 = st.columns(3)
                     date_p = c4.date_input("Date", value=datetime.date.today())
@@ -917,33 +920,44 @@ def render():
                     notes_p = st.text_input("Notes")
 
                     if st.form_submit_button("Planifier"):
-                        try:
-                            ensure_no_intervenant_conflict(
-                                SID,
-                                interv_lbl3[interv_p],
-                                date_p,
-                                hd,
-                                hf,
-                            )
-                            new_iv = sb_insert("interventions", {
-                                "structure_id": SID,
-                                "beneficiaire_id": benef_lbl3[benef_p],
-                                "intervenant_id": interv_lbl3[interv_p],
-                                "date_intervention": date_p.isoformat(),
-                                "heure_debut": hd.strftime("%H:%M"),
-                                "heure_fin": hf.strftime("%H:%M"),
-                                "type_intervention": type_iv,
-                                "statut": "Planifié",
-                                "notes": encode_required_habilitations(notes_p, habs_requises)
-                            })
-                            if new_iv:
-                                audit("CREATE_INTERVENTION", "interventions", new_iv.get("id"))
-                                st.success("Intervention planifiée.")
-                                st.rerun()
-                        except ValidationError as exc:
-                            st.error(str(exc))
-                        except DatabaseError:
-                            st.error("Impossible de vérifier les conflits de planning.")
+                        if benef_p == benef_placeholder:
+                            st.error("Sélectionnez d'abord un bénéficiaire.")
+                        elif hf <= hd:
+                            st.error("L'heure de fin doit être après l'heure de début.")
+                        else:
+                            try:
+                                intervenant_id = None if interv_p == interv_unassigned else interv_lbl3[interv_p]
+                                if intervenant_id:
+                                    ensure_no_intervenant_conflict(
+                                        SID,
+                                        intervenant_id,
+                                        date_p,
+                                        hd,
+                                        hf,
+                                    )
+                                statut_iv = "Urgence à pourvoir" if intervenant_id is None else "Planifié"
+                                new_iv = sb_insert("interventions", {
+                                    "structure_id": SID,
+                                    "beneficiaire_id": benef_lbl3[benef_p],
+                                    "intervenant_id": intervenant_id,
+                                    "date_intervention": date_p.isoformat(),
+                                    "heure_debut": hd.strftime("%H:%M"),
+                                    "heure_fin": hf.strftime("%H:%M"),
+                                    "type_intervention": type_iv,
+                                    "statut": statut_iv,
+                                    "notes": encode_required_habilitations(notes_p, habs_requises)
+                                })
+                                if new_iv:
+                                    audit("CREATE_INTERVENTION", "interventions", new_iv.get("id"), {"statut": statut_iv})
+                                    if intervenant_id is None:
+                                        st.success("Intervention créée comme À pourvoir. Elle est disponible dans l'onglet Urgences.")
+                                    else:
+                                        st.success("Intervention planifiée.")
+                                    st.rerun()
+                            except ValidationError as exc:
+                                st.error(str(exc))
+                            except DatabaseError:
+                                st.error("Impossible de vérifier les conflits de planning.")
 
             # Interventions à venir
             st.markdown("### 📋 Interventions à venir")
