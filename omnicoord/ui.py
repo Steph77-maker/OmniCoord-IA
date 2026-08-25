@@ -67,6 +67,55 @@ def _experience_with_softskills(parcours, soft_skills):
     return parcours
 
 
+
+
+def _normalize_identity_text(value):
+    return " ".join(str(value or "").strip().casefold().split())
+
+
+def _dedupe_intervenants_for_planning(df):
+    """Regroupe les fiches intervenant manifestement dupliquées pour l'affichage planning.
+
+    On privilégie l'email, puis le téléphone, puis nom+prénom+zone. Chaque ligne
+    canonique conserve `_intervenant_ids`, la liste des IDs regroupés, afin que les
+    interventions déjà liées à une ancienne fiche restent visibles sur la même ligne.
+    """
+    if df is None or df.empty:
+        return pd.DataFrame() if df is None else df.copy()
+
+    work = df.copy()
+    groups = {}
+    order = []
+    for idx, row in work.iterrows():
+        email = _normalize_identity_text(row.get("email"))
+        phone = "".join(ch for ch in str(row.get("telephone") or "") if ch.isdigit())
+        nom = _normalize_identity_text(row.get("nom"))
+        prenom = _normalize_identity_text(row.get("prenom"))
+        zone = _normalize_identity_text(row.get("zone_geo"))
+        if email:
+            key = ("email", email)
+        elif phone:
+            key = ("phone", phone)
+        else:
+            key = ("name_zone", prenom, nom, zone)
+
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append((idx, str(row.get("id"))))
+
+    rows = []
+    for key in order:
+        members = groups[key]
+        # La ligne la plus récente dans le DataFrame devient la fiche canonique.
+        canonical_idx = members[-1][0]
+        row = work.loc[canonical_idx].copy()
+        row["_intervenant_ids"] = [member_id for _, member_id in members]
+        row["_duplicate_count"] = len(members)
+        rows.append(row)
+
+    return pd.DataFrame(rows).reset_index(drop=True)
+
 def render():
     SID = st.session_state["structure_id"]
     USER_ID = st.session_state["user_id"]
@@ -1087,9 +1136,12 @@ def render():
         df_benef3 = sb_select("beneficiaires", {"structure_id": SID, "statut": "Actif"}, order="nom")
         if not df_benef3.empty and "deleted_at" in df_benef3.columns:
             df_benef3 = df_benef3[df_benef3["deleted_at"].isna()]
-        df_interv3 = sb_select("intervenants", {"structure_id": SID}, order="nom")
-        if not df_interv3.empty and "deleted_at" in df_interv3.columns:
-            df_interv3 = df_interv3[df_interv3["deleted_at"].isna()]
+        df_interv3_raw = sb_select("intervenants", {"structure_id": SID}, order="nom")
+        if not df_interv3_raw.empty and "deleted_at" in df_interv3_raw.columns:
+            df_interv3_raw = df_interv3_raw[df_interv3_raw["deleted_at"].isna()]
+        # Le planning ne doit jamais afficher deux lignes pour la même personne.
+        # Les anciens IDs sont toutefois conservés afin de ne perdre aucune intervention historique.
+        df_interv3 = _dedupe_intervenants_for_planning(df_interv3_raw)
 
         with tab_plan:
             if "semaine_offset" not in st.session_state:
@@ -1133,9 +1185,10 @@ def render():
                         if df_sem.empty:
                             row_html += '<td><div class="planning-empty">·</div></td>'
                             continue
+                        interv_ids = [str(x) for x in (interv.get("_intervenant_ids") or [interv["id"]])]
                         ivs = df_sem[
                             (df_sem["date_intervention"] == d) &
-                            (df_sem["intervenant_id"] == str(interv["id"]))
+                            (df_sem["intervenant_id"].astype(str).isin(interv_ids))
                         ]
                         if ivs.empty:
                             row_html += '<td><div class="planning-empty">·</div></td>'
@@ -1237,7 +1290,11 @@ def render():
                 df_plan["date_intervention"] = pd.to_datetime(df_plan["date_intervention"]).dt.date
                 df_plan = df_plan[df_plan["date_intervention"] >= datetime.date.today()]
                 benef_noms2 = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_benef3.iterrows()}
-                interv_noms2 = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_interv3.iterrows()}
+                interv_noms2 = {}
+                for _, r in df_interv3.iterrows():
+                    display_name = f"{r['prenom']} {r['nom']}"
+                    for rid in (r.get("_intervenant_ids") or [r["id"]]):
+                        interv_noms2[str(rid)] = display_name
 
                 for _, row in df_plan.iterrows():
                     coul = {"Planifié":"#4c8dfa","Urgence à pourvoir":"#e0554f","Réalisé":"#3fae74","Annulé":"#8996a3"}.get(row["statut"], "#8996a3")
