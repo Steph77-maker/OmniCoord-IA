@@ -532,6 +532,11 @@ def render():
 
             if st.button("🎯 Lancer le matching IA"):
                 try:
+                    # Un nouveau matching ne doit jamais réutiliser des états IA
+                    # ou des résultats issus de l'exécution précédente.
+                    st.session_state.pop("resultats_matching", None)
+                    st.session_state.pop("benef_matching_label", None)
+                    st.session_state.pop("_ai_error_shown", None)
                     with st.spinner("Préfiltrage, scoring puis analyse IA des meilleurs candidats..."):
                         resultats = match_beneficiary(
                             SID,
@@ -544,24 +549,34 @@ def render():
                     if len(df_interv_dispo) > 5:
                         st.caption(
                             f"⚡ {len(df_interv_dispo)} candidats préclassés en Python ; "
-                            "Gemini a analysé uniquement les 5 meilleurs pour limiter coût et latence."
+                            "l'IA peut analyser jusqu'aux 5 meilleurs pour limiter coût et latence."
                         )
                 except DatabaseError:
                     st.error("Impossible de charger les données nécessaires au matching.")
 
             # ── Affichage des résultats ────────────────────────────────────────────
-            if st.session_state.get("resultats_matching"):
+            matching_results = st.session_state.get("resultats_matching") or []
+            same_beneficiary = st.session_state.get("benef_matching_label") == benef_choisi_label
+            if matching_results and same_beneficiary:
                 st.markdown("### 📊 Résultats du matching")
 
-                DIMENSIONS = [
+                ai_count = sum(1 for r in matching_results if r.get("ai_used"))
+                if ai_count:
+                    st.success(f"✨ Analyse IA effectuée sur {ai_count} profil(s). Le score final reste calculé par OmniCoord.")
+                else:
+                    st.info("🧮 Classement métier uniquement : aucune note IA n'est affichée ni simulée.")
+
+                OBJECTIVE_DIMENSIONS = [
                     ("score_competences",  "🛠️ Compétences techniques", "#2f7cf6"),
                     ("score_habilitations","🎓 Habilitations",          "#7c3aed"),
-                    ("score_empathie",     "❤️ Empathie & bienveillance","#e0554f"),
-                    ("score_soft_skills",  "🧠 Soft skills",             "#d99a3d"),
                     ("score_compatibilite","📍 Compatibilité pratique",  "#3fae74"),
                 ]
+                AI_DIMENSIONS = [
+                    ("score_empathie",     "❤️ Empathie & bienveillance","#e0554f"),
+                    ("score_soft_skills",  "🧠 Soft skills",             "#d99a3d"),
+                ]
 
-                for rang, res in enumerate(st.session_state["resultats_matching"], 1):
+                for rang, res in enumerate(matching_results, 1):
                     score = int(res.get("score_global", 0))
                     coul_score = "#3fae74" if score >= 70 else ("#d99a3d" if score >= 45 else "#e0554f")
                     nom_interv = h(res.get("intervenant_nom", ""))
@@ -569,7 +584,11 @@ def render():
                     rangs_emoji = {1: "🥇", 2: "🥈", 3: "🥉"}
                     rang_label = rangs_emoji.get(rang, f"#{rang}")
 
-                    # Carte de résumé
+                    # Carte de résumé. Le statut IA est explicite afin de ne
+                    # jamais présenter une donnée déterministe comme une analyse IA.
+                    ai_used = bool(res.get("ai_used"))
+                    analyse_label = "✨ Analyse IA effectuée" if ai_used else "🧮 Classement métier uniquement"
+                    profil_resume = res.get("profil_humain", "") if ai_used else "Score fondé sur les données métier enregistrées."
                     st.markdown(f"""
                         <div class="oc-card" style="border-left-color:{coul_score};">
                             <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -579,8 +598,9 @@ def render():
                                 </div>
                                 <span class="oc-badge" style="background:{coul_score}; font-size:16px;">{score}%</span>
                             </div>
-                            <div style="color:#b8c2cc; font-size:13px; margin-top:6px; font-style:italic;">
-                                {h(res.get('profil_humain', ''))}
+                            <div style="color:#8fa1b4; font-size:12px; margin-top:6px; font-weight:700;">{analyse_label}</div>
+                            <div style="color:#b8c2cc; font-size:13px; margin-top:4px; font-style:italic;">
+                                {h(profil_resume)}
                             </div>
                         </div>
                     """, unsafe_allow_html=True)
@@ -622,14 +642,18 @@ def render():
                                 """, unsafe_allow_html=True)
                             st.markdown("---")
 
-                        # ── Scores par dimension (pastilles style OmniRecrut) ──
+                        # ── Scores par dimension ──
                         st.markdown("#### 📊 Évaluation par dimension")
-                        for i in range(0, len(DIMENSIONS), 2):
-                            paire = DIMENSIONS[i:i+2]
+                        dimensions = list(OBJECTIVE_DIMENSIONS)
+                        if ai_used:
+                            dimensions += [d for d in AI_DIMENSIONS if isinstance(res.get(d[0]), int)]
+
+                        for i in range(0, len(dimensions), 2):
+                            paire = dimensions[i:i+2]
                             cols_dim = st.columns(len(paire))
                             for col_d, (cle, label, couleur) in zip(cols_dim, paire):
-                                val = int(res.get(cle, 0))
-                                nb_pleines = round(val / 20)  # 5 pastilles max
+                                val = int(res.get(cle, 0) or 0)
+                                nb_pleines = round(val / 20)
                                 pastilles = "".join([
                                     f'<span style="display:inline-block; width:16px; height:16px; '
                                     f'border-radius:50%; margin-right:5px; '
@@ -650,6 +674,8 @@ def render():
                                             <div>{pastilles}</div>
                                         </div>
                                     """, unsafe_allow_html=True)
+                        if not ai_used:
+                            st.caption("Les dimensions humaines ne sont affichées que lorsqu'une analyse IA a réellement abouti.")
                         st.markdown("---")
 
                         # ── Compétences transférables ──
@@ -688,7 +714,7 @@ def render():
                                 score_global=score,
                                 profil_humain=res.get("profil_humain", ""),
                                 traits_dominants=res.get("traits_dominants", []),
-                                dimensions=DIMENSIONS,
+                                dimensions=dimensions,
                                 scores=res,
                                 competences_transferables=res.get("competences_transferables", []),
                                 alerte_habilitation=res.get("alerte_habilitation", ""),
