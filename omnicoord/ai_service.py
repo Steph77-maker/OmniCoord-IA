@@ -16,7 +16,8 @@ logger = logging.getLogger("omnicoord.ai")
 try:
     gemini_key = st.secrets["GEMINI_API_KEY"]
     genai.configure(api_key=gemini_key)
-    model = genai.GenerativeModel("gemini-2.0-flash")
+    GEMINI_MODEL = st.secrets.get("GEMINI_MODEL", "gemini-2.5-flash")
+    model = genai.GenerativeModel(GEMINI_MODEL)
     IA_DISPONIBLE = True
 except Exception:
     IA_DISPONIBLE = False
@@ -115,10 +116,14 @@ def _generate(prompt: str) -> str | None:
         text = (response.text or "").strip()
         if not text:
             raise ValueError("Réponse IA vide")
+        st.session_state.pop("_ai_error_shown", None)
         return text
     except Exception:
-        logger.exception("Gemini generation failed")
-        st.error("Le service IA est momentanément indisponible. Réessayez.")
+        logger.exception("Gemini generation failed (model=%s)", globals().get("GEMINI_MODEL", "unknown"))
+        # Évite d'afficher la même erreur une fois par candidat lors d'un matching.
+        if not st.session_state.get("_ai_error_shown", False):
+            st.error("Le service IA est momentanément indisponible. Le classement métier reste disponible sans l’analyse qualitative IA.")
+            st.session_state["_ai_error_shown"] = True
         return None
 
 

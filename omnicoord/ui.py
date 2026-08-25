@@ -4,20 +4,23 @@ Cette première migration conserve volontairement le comportement existant.
 """
 import datetime
 import html
+import logging
 import math
 import urllib.parse
 import pandas as pd
 import streamlit as st
 from . import core
 from .matching_service import match_beneficiary
-from .planning_service import ensure_no_intervenant_conflict
+from .planning_service import ensure_no_intervenant_conflict, find_duplicate_interventions
 from .replacement_service import (
+    NO_EXPIRY_DATE,
     encode_required_habilitations,
     required_habilitations,
     rank_replacements,
     validate_replacement_candidate,
 )
 from .exceptions import ValidationError, DatabaseError
+from .cv_service import analyse_cv
 
 # Aliases conservés pour limiter les changements de comportement pendant la migration.
 sb = core.sb
@@ -43,6 +46,8 @@ creer_pdf_export_rgpd = core.creer_pdf_export_rgpd
 _generer_pdf_matching = core._generer_pdf_matching
 envoyer_email = core.envoyer_email
 chiffrer_mdp_mail = core.chiffrer_mdp_mail
+
+logger = logging.getLogger("omnicoord.ui")
 
 def render():
     SID = st.session_state["structure_id"]
@@ -131,8 +136,9 @@ def render():
                                         })
                                         audit("CREATE_USER", "profils", new_uid, {"structure": nom_struct})
                                         st.success(f"✅ Accès créé pour {p_email} jusqu'au {date_fr(date_fin, 'court')}")
-                                    except Exception as e:
-                                        st.error(f"Erreur : {e}")
+                                    except Exception:
+                                        logger.exception("Création d'accès utilisateur impossible")
+                                        st.error("Impossible de créer l'accès. Consultez les journaux administrateur si le problème persiste.")
 
             with st.sidebar.expander("📊 Quotas IA"):
                 df_users = sb_select("profils", order="email")
@@ -288,6 +294,8 @@ def render():
 
         with tab_liste:
             df_interv = sb_select("intervenants", {"structure_id": SID}, order="date_ajout")
+            if not df_interv.empty and "deleted_at" in df_interv.columns:
+                df_interv = df_interv[df_interv["deleted_at"].isna()]
             col_f1, col_f2 = st.columns(2)
             filtre_type = col_f1.selectbox("Statut", ["Tous", "Interne", "Vivier candidat", "Externe ponctuel"])
             filtre_dispo = col_f2.selectbox("Disponibilité", ["Toutes", "Disponible", "En mission", "Indisponible"])
@@ -334,17 +342,22 @@ def render():
                                     st.success("Statut mis à jour.")
                                     st.rerun()
                         with col_b:
-                            if st.button("🗑️ Supprimer", key=f"del_{row['id']}"):
-                                if sb_update("intervenants", {"deleted_at": datetime.datetime.utcnow().isoformat()}, "id", row["id"]):
-                                    audit("DELETE_INTERVENANT", "intervenants", str(row["id"]))
-                                    st.warning("Intervenant archivé.")
+                            confirm_archive = st.checkbox(
+                                "Confirmer le retrait du vivier",
+                                key=f"confirm_del_{row['id']}",
+                                help="La fiche est archivée pour préserver l'historique des interventions ; elle disparaît des listes actives.",
+                            )
+                            if st.button("🗑️ Archiver / retirer", key=f"del_{row['id']}", disabled=not confirm_archive):
+                                if sb_update("intervenants", {"deleted_at": datetime.datetime.utcnow().isoformat(), "statut_dispo": "Indisponible"}, "id", row["id"]):
+                                    audit("ARCHIVE_INTERVENANT", "intervenants", str(row["id"]))
+                                    st.success("Intervenant archivé et retiré du vivier actif.")
                                     st.rerun()
                         st.write(f"**Parcours :** {row.get('experience_texte') or 'Non renseigné'}")
                         st.write(f"**Disponibilités :** {row.get('disponibilites') or 'Non renseigné'}")
                         st.write(f"**Contact :** {row.get('telephone') or ''} — {row.get('email') or ''}")
 
         with tab_ajout:
-            with st.form("form_ajout_interv"):
+            with st.form("form_ajout_interv", clear_on_submit=True):
                 col1, col2 = st.columns(2)
                 with col1:
                     nom = st.text_input("Nom *")
@@ -372,7 +385,22 @@ def render():
                 )
 
                 if st.form_submit_button("Ajouter au vivier") and nom and prenom:
-                    new_row = sb_insert("intervenants", {
+                    duplicate = False
+                    if not df_interv.empty:
+                        same_email = pd.Series(False, index=df_interv.index)
+                        if email_i.strip() and "email" in df_interv.columns:
+                            same_email = df_interv["email"].fillna("").astype(str).str.strip().str.casefold() == email_i.strip().casefold()
+                        same_identity = (
+                            df_interv["nom"].fillna("").astype(str).str.strip().str.casefold().eq(nom.strip().casefold())
+                            & df_interv["prenom"].fillna("").astype(str).str.strip().str.casefold().eq(prenom.strip().casefold())
+                        )
+                        if telephone.strip() and "telephone" in df_interv.columns:
+                            same_identity &= df_interv["telephone"].fillna("").astype(str).str.replace(r"\D", "", regex=True).eq("".join(ch for ch in telephone if ch.isdigit()))
+                        duplicate = bool((same_email | same_identity).any())
+                    if duplicate:
+                        st.error("Une fiche similaire existe déjà dans le vivier. Vérifiez-la avant de créer un doublon.")
+                    else:
+                        new_row = sb_insert("intervenants", {
                         "structure_id": SID, "nom": nom.strip(), "prenom": prenom.strip(),
                         "telephone": telephone, "email": email_i, "type_statut": type_statut,
                         "competences": competences, "experience_texte": experience_texte,
@@ -383,14 +411,84 @@ def render():
                         # Stocké dans experience_texte enrichi si pas de colonne dédiée
                         # On préfixe pour que l'IA puisse le distinguer
                         "experience_texte": f"{experience_texte}\n\n[SOFT SKILLS / PERSONNALITÉ] : {soft_skills}" if soft_skills else experience_texte,
-                    })
-                    if new_row:
-                        audit("CREATE_INTERVENANT", "intervenants", new_row.get("id"))
-                        st.success(f"{prenom} {nom} ajouté(e).")
-                        st.rerun()
+                        })
+                        if new_row:
+                            audit("CREATE_INTERVENANT", "intervenants", new_row.get("id"))
+                            st.success(f"{prenom} {nom} ajouté(e).")
+                            st.rerun()
 
         with tab_sourcing:
-            st.subheader("🔎 Sourcing direct — réduire la dépendance aux agences")
+            st.subheader("🔎 Sourcing & analyse de CV")
+            st.caption("Le CV est analysé pour préremplir la fiche. Le coordinateur garde toujours la validation finale avant l'enregistrement.")
+
+            uploaded_cv = st.file_uploader("Importer un CV", type=["pdf", "txt"], help="PDF texte ou TXT, 8 Mo maximum.")
+            if st.button("🧠 Analyser le CV avec l'IA", disabled=uploaded_cv is None):
+                try:
+                    with st.spinner("Lecture et structuration du CV..."):
+                        data_cv = analyse_cv(uploaded_cv)
+                    if data_cv:
+                        st.session_state["cv_analysis"] = data_cv
+                        st.success("CV analysé. Vérifiez les informations avant l'ajout au vivier.")
+                except ValidationError as exc:
+                    st.error(str(exc))
+
+            data_cv = st.session_state.get("cv_analysis")
+            if data_cv:
+                detected = data_cv.get("habilitations_detectees") or []
+                if detected:
+                    st.info("Conformité détectée dans le CV : " + ", ".join(detected) + ". Vérifiez les justificatifs avant de l'enregistrer dans Conformité & Habilitations.")
+                with st.form("form_cv_candidate", clear_on_submit=True):
+                    cva, cvb = st.columns(2)
+                    with cva:
+                        cv_nom = st.text_input("Nom *", value=str(data_cv.get("nom") or ""))
+                        cv_prenom = st.text_input("Prénom *", value=str(data_cv.get("prenom") or ""))
+                        cv_tel = st.text_input("Téléphone", value=str(data_cv.get("telephone") or ""))
+                        cv_email = st.text_input("Email", value=str(data_cv.get("email") or ""))
+                        cv_statut = st.selectbox("Statut", ["Vivier candidat", "Interne", "Externe ponctuel"])
+                    with cvb:
+                        cv_comp = st.text_area("Compétences / gestes techniques", value=str(data_cv.get("competences") or ""))
+                        cv_exp = st.text_area("Parcours professionnel", value=str(data_cv.get("experience_texte") or ""))
+                        cv_zone = st.text_input("Zone géographique", value=str(data_cv.get("zone_geo") or ""))
+                        cv_dispo = st.text_input("Disponibilités", value=str(data_cv.get("disponibilites") or ""))
+                        cv_soft = st.text_area("Observations personnalité / soft skills", value=str(data_cv.get("soft_skills") or ""))
+                    if st.form_submit_button("✅ Valider et ajouter au vivier"):
+                        if not cv_nom.strip() or not cv_prenom.strip():
+                            st.error("Nom et prénom sont obligatoires.")
+                        else:
+                            existing = sb_select("intervenants", {"structure_id": SID})
+                            duplicate = False
+                            if not existing.empty:
+                                if "deleted_at" in existing.columns:
+                                    existing = existing[existing["deleted_at"].isna()]
+                                if cv_email.strip() and "email" in existing.columns:
+                                    duplicate = bool((existing["email"].fillna("").astype(str).str.strip().str.casefold() == cv_email.strip().casefold()).any())
+                                if not duplicate:
+                                    duplicate = bool((
+                                        existing["nom"].fillna("").astype(str).str.strip().str.casefold().eq(cv_nom.strip().casefold())
+                                        & existing["prenom"].fillna("").astype(str).str.strip().str.casefold().eq(cv_prenom.strip().casefold())
+                                    ).any())
+                            if duplicate:
+                                st.error("Un candidat similaire existe déjà. Aucune nouvelle fiche n'a été créée.")
+                            else:
+                                enriched_exp = cv_exp
+                                if cv_soft.strip():
+                                    enriched_exp = f"{cv_exp}\n\n[SOFT SKILLS / PERSONNALITÉ] : {cv_soft}".strip()
+                                new_cv = sb_insert("intervenants", {
+                                    "structure_id": SID, "nom": cv_nom.strip(), "prenom": cv_prenom.strip(),
+                                    "telephone": cv_tel.strip(), "email": cv_email.strip(), "type_statut": cv_statut,
+                                    "competences": cv_comp.strip(), "experience_texte": enriched_exp,
+                                    "zone_geo": cv_zone.strip(), "disponibilites": cv_dispo.strip(),
+                                    "statut_dispo": "Disponible", "source": "CVthèque",
+                                    "date_ajout": datetime.date.today().isoformat(),
+                                })
+                                if new_cv:
+                                    audit("CREATE_INTERVENANT_FROM_CV", "intervenants", new_cv.get("id"), {"habilitations_detectees": detected})
+                                    st.session_state.pop("cv_analysis", None)
+                                    st.success("Candidat ajouté au vivier. Les habilitations détectées restent à valider sur justificatif.")
+                                    st.rerun()
+
+            st.markdown("---")
+            st.markdown("#### Recherche externe")
             col_s1, col_s2 = st.columns(2)
             metier = col_s1.text_input("Métier", value="Auxiliaire de vie")
             zone = col_s2.text_input("Zone géographique", value="")
@@ -605,7 +703,7 @@ def render():
                                 key=f"pdf_matching_{rang}"
                             )
                         except Exception as e_pdf:
-                            logger.error(f"PDF matching: {e_pdf}")
+                            logging.getLogger("omnicoord.ui").exception("PDF matching impossible", exc_info=e_pdf)
                             st.caption("Export PDF indisponible.")
 
 
@@ -616,10 +714,14 @@ def render():
         tab_liste_b, tab_ajout_b = st.tabs(["📋 Bénéficiaires", "➕ Ajouter"])
 
         df_interv_all = sb_select("intervenants", {"structure_id": SID}, order="nom")
+        if not df_interv_all.empty and "deleted_at" in df_interv_all.columns:
+            df_interv_all = df_interv_all[df_interv_all["deleted_at"].isna()]
         interv_map = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_interv_all.iterrows()}
 
         with tab_liste_b:
             df_b = sb_select("beneficiaires", {"structure_id": SID}, order="nom")
+            if not df_b.empty and "deleted_at" in df_b.columns:
+                df_b = df_b[df_b["deleted_at"].isna()]
             st.metric("Bénéficiaires actifs", len(df_b[df_b["statut"] == "Actif"]) if not df_b.empty else 0)
 
             if df_b.empty:
@@ -704,13 +806,19 @@ def render():
                                     mime="application/pdf",
                                     key=f"dl_rgpd_{row['id']}"
                                 )
-                            if st.button("🗑️ Supprimer", key=f"del_b_{row['id']}"):
-                                sb_update("beneficiaires", {"deleted_at": datetime.datetime.utcnow().isoformat(), "statut": "Inactif"}, "id", row["id"])
-                                audit("DELETE_BENEFICIAIRE", "beneficiaires", str(row["id"]))
-                                st.rerun()
+                            confirm_b = st.checkbox(
+                                "Confirmer l'archivage",
+                                key=f"confirm_del_b_{row['id']}",
+                                help="La fiche est retirée des listes actives mais l'historique est conservé.",
+                            )
+                            if st.button("🗑️ Archiver / retirer", key=f"del_b_{row['id']}", disabled=not confirm_b):
+                                if sb_update("beneficiaires", {"deleted_at": datetime.datetime.utcnow().isoformat(), "statut": "Inactif"}, "id", row["id"]):
+                                    audit("ARCHIVE_BENEFICIAIRE", "beneficiaires", str(row["id"]))
+                                    st.success("Bénéficiaire archivé et retiré des listes actives.")
+                                    st.rerun()
 
         with tab_ajout_b:
-            with st.form("form_add_benef"):
+            with st.form("form_add_benef", clear_on_submit=True):
                 c1, c2 = st.columns(2)
                 with c1:
                     nom_b = st.text_input("Nom *")
@@ -732,7 +840,16 @@ def render():
                 att_sel = st.selectbox("Intervenant attitré (optionnel)", list(opts_att.keys()))
 
                 if st.form_submit_button("Ajouter") and nom_b and prenom_b:
-                    new_b = sb_insert("beneficiaires", {
+                    duplicate_b = False
+                    if not df_b.empty:
+                        duplicate_b = bool((
+                            df_b["nom"].fillna("").astype(str).str.strip().str.casefold().eq(nom_b.strip().casefold())
+                            & df_b["prenom"].fillna("").astype(str).str.strip().str.casefold().eq(prenom_b.strip().casefold())
+                        ).any())
+                    if duplicate_b:
+                        st.error("Un bénéficiaire portant ce nom et ce prénom existe déjà dans la liste active.")
+                    else:
+                        new_b = sb_insert("beneficiaires", {
                         "structure_id": SID, "nom": nom_b.strip(), "prenom": prenom_b.strip(),
                         "adresse": adresse_b, "telephone": telephone_b, "niveau_dependance": niveau_dep,
                         "gestes_techniques": gestes_b, "besoins_horaires": horaires_b,
@@ -740,11 +857,11 @@ def render():
                         "contact_urgence_nom": contact_urgence_nom_b, "contact_urgence_tel": contact_urgence_tel_b,
                         "intervenant_attitré_id": opts_att[att_sel],
                         "statut": "Actif", "date_creation": datetime.date.today().isoformat()
-                    })
-                    if new_b:
-                        audit("CREATE_BENEFICIAIRE", "beneficiaires", new_b.get("id"))
-                        st.success(f"{prenom_b} {nom_b} ajouté(e).")
-                        st.rerun()
+                        })
+                        if new_b:
+                            audit("CREATE_BENEFICIAIRE", "beneficiaires", new_b.get("id"))
+                            st.success(f"{prenom_b} {nom_b} ajouté(e).")
+                            st.rerun()
 
 
     # ============================================================
@@ -803,8 +920,9 @@ def render():
                     try:
                         pdf_b = creer_pdf_transmission(benef_ch2, interv_ch2, datetime.date.today().strftime("%d/%m/%Y"), texte_final)
                         st.download_button("⬇️ PDF", data=pdf_b, file_name=f"{type_doc}_{benef_ch2}.pdf", mime="application/pdf")
-                    except Exception as e:
-                        st.error(f"Erreur PDF : {e}")
+                    except Exception:
+                        logger.exception("Génération PDF impossible")
+                        st.error("Impossible de générer le PDF pour le moment.")
 
             st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
             st.markdown("### 🗂️ Historique")
@@ -823,7 +941,11 @@ def render():
         tab_plan, tab_ajout_p, tab_urg = st.tabs(["📊 Planning hebdo", "➕ Planifier", "🚨 Urgences"])
 
         df_benef3 = sb_select("beneficiaires", {"structure_id": SID, "statut": "Actif"}, order="nom")
+        if not df_benef3.empty and "deleted_at" in df_benef3.columns:
+            df_benef3 = df_benef3[df_benef3["deleted_at"].isna()]
         df_interv3 = sb_select("intervenants", {"structure_id": SID}, order="nom")
+        if not df_interv3.empty and "deleted_at" in df_interv3.columns:
+            df_interv3 = df_interv3[df_interv3["deleted_at"].isna()]
 
         with tab_plan:
             if "semaine_offset" not in st.session_state:
@@ -898,7 +1020,7 @@ def render():
                 if not df_habs_plan.empty and "type_habilitation" in df_habs_plan.columns:
                     hab_options.update(df_habs_plan["type_habilitation"].dropna().astype(str).tolist())
                 hab_options = sorted(hab_options)
-                with st.form("form_plan"):
+                with st.form("form_plan", clear_on_submit=True):
                     c1, c2, c3 = st.columns(3)
                     benef_lbl3 = {f"{r['prenom']} {r['nom']}": str(r["id"]) for _, r in df_benef3.iterrows()}
                     interv_lbl3 = {f"{r['prenom']} {r['nom']}": str(r["id"]) for _, r in df_interv3.iterrows()}
@@ -927,6 +1049,11 @@ def render():
                         else:
                             try:
                                 intervenant_id = None if interv_p == interv_unassigned else interv_lbl3[interv_p]
+                                duplicates = find_duplicate_interventions(
+                                    SID, benef_lbl3[benef_p], date_p, hd, hf, type_iv
+                                )
+                                if not duplicates.empty:
+                                    raise ValidationError("Une intervention identique existe déjà pour ce bénéficiaire, à cette date et sur ce créneau.")
                                 if intervenant_id:
                                     ensure_no_intervenant_conflict(
                                         SID,
@@ -1093,6 +1220,8 @@ def render():
         tab_suivi, tab_ajout_hab = st.tabs(["📋 Suivi", "➕ Ajouter"])
 
         df_interv4 = sb_select("intervenants", {"structure_id": SID}, order="nom")
+        if not df_interv4.empty and "deleted_at" in df_interv4.columns:
+            df_interv4 = df_interv4[df_interv4["deleted_at"].isna()]
         aujourd = datetime.date.today()
         seuil = aujourd + datetime.timedelta(days=60)
 
@@ -1105,9 +1234,10 @@ def render():
                 df_habs["intervenant_nom"] = df_habs["intervenant_id"].apply(lambda x: interv_noms4.get(str(x), "Inconnu"))
                 df_habs["date_exp_dt"] = pd.to_datetime(df_habs["date_expiration"], errors="coerce").dt.date
 
-                exp = df_habs[df_habs["date_exp_dt"] < aujourd]
-                bientot = df_habs[(df_habs["date_exp_dt"] >= aujourd) & (df_habs["date_exp_dt"] <= seuil)]
-                ok = df_habs[df_habs["date_exp_dt"] > seuil]
+                exp = df_habs[df_habs["date_exp_dt"].notna() & (df_habs["date_exp_dt"] < aujourd)]
+                bientot = df_habs[df_habs["date_exp_dt"].notna() & (df_habs["date_exp_dt"] >= aujourd) & (df_habs["date_exp_dt"] <= seuil)]
+                permanent = df_habs[df_habs["date_exp_dt"].isna() | (df_habs["date_exp_dt"] == NO_EXPIRY_DATE)]
+                ok = pd.concat([df_habs[(df_habs["date_exp_dt"] > seuil) & (df_habs["date_exp_dt"] != NO_EXPIRY_DATE)], permanent], ignore_index=False)
 
                 c1, c2, c3 = st.columns(3)
                 c1.metric("🔴 Expirées", len(exp))
@@ -1124,21 +1254,33 @@ def render():
                         st.markdown(f'<div class="oc-card oc-card-warning"><b>{h(hb["intervenant_nom"])}</b> — {h(hb["type_habilitation"])} — expire le {hb["date_expiration"]}</div>', unsafe_allow_html=True)
                 if not ok.empty:
                     with st.expander("🟢 À jour"):
-                        st.dataframe(ok[["intervenant_nom","type_habilitation","date_obtention","date_expiration"]], use_container_width=True, hide_index=True)
+                        ok_display = ok[["intervenant_nom","type_habilitation","date_obtention","date_expiration"]].copy()
+                        ok_display["date_expiration"] = ok_display["date_expiration"].apply(
+                            lambda v: "Valide sans date d'expiration" if (pd.isna(v) or str(v)[:10] == "9999-12-31") else v
+                        )
+                        st.dataframe(ok_display, use_container_width=True, hide_index=True)
 
         with tab_ajout_hab:
             if df_interv4.empty:
                 st.info("Ajoutez d'abord un intervenant.")
             else:
-                with st.form("form_hab"):
+                validite_mode = st.radio(
+                    "Validité",
+                    ["Avec date d'expiration", "Valide sans date d'expiration"],
+                    horizontal=True,
+                    key="hab_validite_mode",
+                )
+                with st.form("form_hab", clear_on_submit=True):
                     interv_lbl4 = {f"{r['prenom']} {r['nom']}": str(r["id"]) for _, r in df_interv4.iterrows()}
                     interv_sel = st.selectbox("Intervenant", list(interv_lbl4.keys()))
                     type_hab = st.selectbox("Type", ["Diplôme AES","DEAES","PSC1 / SST","Permis B","Visite médecine du travail","Habilitation gestes et postures","AFGSU","Autre"])
                     date_obt = st.date_input("Date d'obtention")
-                    date_exp = st.date_input("Date d'expiration")
+                    date_exp = None
+                    if validite_mode == "Avec date d'expiration":
+                        date_exp = st.date_input("Date d'expiration")
 
                     if st.form_submit_button("Ajouter"):
-                        if date_exp <= date_obt:
+                        if date_exp is not None and date_exp <= date_obt:
                             st.error("La date d'expiration doit être après la date d'obtention.")
                         else:
                             new_h = sb_insert("habilitations", {
@@ -1146,10 +1288,12 @@ def render():
                                 "intervenant_id": interv_lbl4[interv_sel],
                                 "type_habilitation": type_hab,
                                 "date_obtention": date_obt.isoformat(),
-                                "date_expiration": date_exp.isoformat()
+                                # Sentinelle rétrocompatible : évite d'exiger une migration si
+                                # date_expiration est NOT NULL dans une base déjà déployée.
+                                "date_expiration": date_exp.isoformat() if date_exp is not None else NO_EXPIRY_DATE.isoformat(),
                             })
                             if new_h:
-                                audit("CREATE_HABILITATION", "habilitations", new_h.get("id"))
+                                audit("CREATE_HABILITATION", "habilitations", new_h.get("id"), {"sans_expiration": date_exp is None})
                                 st.success("Habilitation ajoutée.")
                                 st.rerun()
 
@@ -1241,8 +1385,9 @@ def render():
                             sb.auth.update_user({"password": n1})
                             audit("CHANGE_PASSWORD", "profils", USER_ID)
                             st.success("Mot de passe mis à jour.")
-                        except Exception as e:
-                            st.error(f"Erreur : {e}")
+                        except Exception:
+                            logger.exception("Mise à jour du mot de passe impossible")
+                            st.error("Impossible d'effectuer cette opération pour le moment.")
 
             st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
             st.subheader("📧 Ma boîte mail (envoi des accès clients)")
@@ -1305,8 +1450,9 @@ def render():
                             sb.auth.update_user({"password": n1})
                             audit("CHANGE_PASSWORD", "profils", USER_ID)
                             st.success("Mot de passe mis à jour.")
-                        except Exception as e:
-                            st.error(f"Erreur : {e}")
+                        except Exception:
+                            logger.exception("Mise à jour du mot de passe impossible")
+                            st.error("Impossible d'effectuer cette opération pour le moment.")
 
             st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
             st.subheader("📧 Ma boîte mail (sollicitations intervenants)")
@@ -1504,8 +1650,9 @@ def render():
                                     audit("DELETE_CLIENT", "profils", str(client["id"]), {"email": client["email"]})
                                     st.success(f"Client {client['email']} supprimé.")
                                     st.rerun()
-                                except Exception as e:
-                                    st.error(f"Erreur : {e}")
+                                except Exception:
+                                    logger.exception("Suppression du client impossible")
+                                    st.error("Impossible de supprimer ce client pour le moment.")
                             else:
                                 st.warning("Cochez la case de confirmation.")
 
@@ -1599,8 +1746,8 @@ def render():
                                 if "already been registered" in err_msg or "already exists" in err_msg:
                                     st.error("Cet email est déjà utilisé par un autre compte.")
                                 else:
-                                    logger.error(f"Création client: {e}")
-                                    st.error(f"Erreur lors de la création : {e}")
+                                    logger.exception("Création client impossible")
+                                    st.error("Erreur lors de la création du client. Réessayez ou consultez les journaux.")
 
         # ----------------------------------------------------------
         #  TAB 3 : QUOTAS IA
