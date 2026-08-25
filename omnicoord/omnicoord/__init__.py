@@ -1,1 +1,0 @@
-"""OmniCoord IA package."""
