@@ -1173,10 +1173,14 @@ def render():
                 st.info("Ajoutez des intervenants pour voir le planning.")
             else:
                 headers_html = '<th class="col-intervenant">Intervenant</th>'
+                # Libellés explicites pour éviter qu'un navigateur/traducteur interprète
+                # "Mar. 25/08" comme une date du type "25 mars 2008".
+                jours_planning = ("Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche")
                 for d in dates_sem:
                     is_today = (d == aujourd)
                     style = " style='background:rgba(47,124,246,0.25); color:#4c8dfa;'" if is_today else ""
-                    headers_html += f'<th{style}>{date_fr(d,"semaine")}</th>'
+                    libelle_jour = f"{jours_planning[d.weekday()]} {d.strftime('%d/%m')}"
+                    headers_html += f'<th{style}>{libelle_jour}</th>'
 
                 rows_html = ""
                 for _, interv in df_interv3.iterrows():
