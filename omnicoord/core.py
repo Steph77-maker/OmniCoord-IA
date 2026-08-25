@@ -26,7 +26,7 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 from .database import sb, get_supabase, get_supabase_admin, sb_select, sb_insert, sb_update, sb_delete, sb_rpc, audit
 from .security import date_fr, chiffrer_mdp_mail, dechiffrer_mdp_mail, h, est_bloque, enregistrer_tentative
 from .auth import check_password
-from .ai_service import IA_DISPONIBLE, model, peut_utiliser_ia, incrementer_quota_ia, appel_ia, appel_ia_texte, distance_km, classer_candidats_urgence
+from .ai_service import IA_DISPONIBLE, peut_utiliser_ia, incrementer_quota_ia, appel_ia, appel_ia_texte, distance_km, classer_candidats_urgence
 from .pdf_service import PDFDocument, creer_pdf_transmission, creer_pdf_export_rgpd, generer_pdf_matching
 from .email_service import envoyer_email
 _generer_pdf_matching = generer_pdf_matching
