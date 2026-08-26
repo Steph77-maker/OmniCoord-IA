@@ -77,6 +77,24 @@ def _normalize_identity_text(value):
 
 
 
+def _resolve_document_placeholders(text: str, date_value: datetime.date | None = None) -> str:
+    """Remplace les placeholders de date que l'IA pourrait laisser dans un document.
+
+    La date est injectée côté OmniCoord afin de ne jamais dépendre du modèle pour
+    une information déterministe.
+    """
+    date_value = date_value or datetime.date.today()
+    date_fr_value = date_value.strftime("%d/%m/%Y")
+    result = str(text or "")
+    placeholders = (
+        "[Date du jour]", "[DATE DU JOUR]", "[date du jour]",
+        "{{date_du_jour}}", "{{DATE_DU_JOUR}}",
+    )
+    for placeholder in placeholders:
+        result = result.replace(placeholder, date_fr_value)
+    return result
+
+
 def _time_minutes(value):
     """Convertit HH:MM[:SS] en minutes ; None si la valeur est inexploitable."""
     if isinstance(value, datetime.time):
@@ -1386,32 +1404,40 @@ Contrôles OmniCoord :
         else:
             c1, c2 = st.columns(2)
             benef_lbl2 = {f"{r['prenom']} {r['nom']}": str(r["id"]) for _, r in df_benef2.iterrows()}
+            benef_by_id2 = {v: k for k, v in benef_lbl2.items()}
             benef_ch2 = c1.selectbox("Bénéficiaire", list(benef_lbl2.keys()))
             interv_lbl2 = {"Non spécifié": None}
             interv_lbl2.update({f"{r['prenom']} {r['nom']}": str(r["id"]) for _, r in df_interv2.iterrows()})
+            interv_by_id2 = {str(v): k for k, v in interv_lbl2.items() if v is not None}
             interv_ch2 = c2.selectbox("Intervenant rédacteur", list(interv_lbl2.keys()))
 
-            type_doc = st.selectbox("Type", ["Fiche de liaison","Compte-rendu de visite","Transmission d'équipe","Note d'incident"])
+            doc_types = ["Fiche de liaison", "Compte-rendu de visite", "Transmission d'équipe", "Note d'incident"]
+            type_doc = st.selectbox("Type", doc_types)
             notes_brutes = st.text_area("Notes brutes", height=150)
 
             if st.button("✍️ Générer avec l'IA"):
                 if not notes_brutes:
                     st.warning("Ajoutez des notes avant de générer.")
                 else:
+                    today_fr = datetime.date.today().strftime("%d/%m/%Y")
                     prompt = f"""
                     Tu es coordinateur(trice) en SAAD. Rédige un document de type "{type_doc}"
                     à partir des notes brutes, en style professionnel, factuel, 10-15 lignes max.
                     N'ajoute aucune information médicale absente des notes.
+                    La date du document est le {today_fr}. Utilise cette date exacte si une date est nécessaire ;
+                    ne laisse jamais de placeholder comme [Date du jour].
 
                     Bénéficiaire : {benef_ch2}
                     Notes : {notes_brutes}
                     """
                     texte_ia = appel_ia_texte(prompt)
                     if texte_ia is not None:
-                        st.session_state["doc_genere"] = texte_ia
+                        st.session_state["doc_genere"] = _resolve_document_placeholders(texte_ia)
 
             if st.session_state.get("doc_genere"):
-                texte_final = st.text_area("Document (modifiable)", value=st.session_state["doc_genere"], height=250)
+                contenu_initial = _resolve_document_placeholders(st.session_state["doc_genere"])
+                texte_final = st.text_area("Document (modifiable)", value=contenu_initial, height=250)
+                texte_final = _resolve_document_placeholders(texte_final)
                 col_s, col_p = st.columns(2)
                 with col_s:
                     if st.button("💾 Enregistrer"):
@@ -1426,22 +1452,96 @@ Contrôles OmniCoord :
                         if new_doc:
                             audit("CREATE_DOCUMENT", "documents_transmissions", new_doc.get("id"))
                             st.success("Document enregistré.")
+                            st.session_state["doc_genere"] = texte_final
                 with col_p:
                     try:
-                        pdf_b = creer_pdf_transmission(benef_ch2, interv_ch2, datetime.date.today().strftime("%d/%m/%Y"), texte_final, type_document=type_doc, genere_par_ia=True)
+                        pdf_b = creer_pdf_transmission(
+                            benef_ch2, interv_ch2, datetime.date.today().strftime("%d/%m/%Y"),
+                            texte_final, type_document=type_doc, genere_par_ia=True
+                        )
                         st.download_button("⬇️ PDF", data=pdf_b, file_name=f"{type_doc}_{benef_ch2}.pdf", mime="application/pdf")
                     except Exception:
                         logger.exception("Génération PDF impossible")
                         st.error("Impossible de générer le PDF pour le moment.")
 
-            st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
+            st.divider()
             st.markdown("### 🗂️ Historique")
             df_docs = sb_select("documents_transmissions", {"structure_id": SID}, order="date_creation")
             if df_docs.empty:
                 st.caption("Aucun document enregistré.")
             else:
-                st.dataframe(df_docs[["date_creation","type_document","contenu"]].head(50),
-                            use_container_width=True, hide_index=True)
+                docs_display = df_docs.head(50).copy()
+                # Les entrées sont éditables une par une afin d'éviter les suppressions accidentelles.
+                for _, doc in docs_display.iterrows():
+                    doc_id = str(doc.get("id", ""))
+                    doc_date = str(doc.get("date_creation", ""))
+                    doc_type = str(doc.get("type_document", "Document") or "Document")
+                    benef_id = str(doc.get("beneficiaire_id", "") or "")
+                    interv_id = str(doc.get("intervenant_id", "") or "")
+                    benef_name = benef_by_id2.get(benef_id, "Bénéficiaire non disponible")
+                    interv_name = interv_by_id2.get(interv_id, "Non spécifié") if interv_id else "Non spécifié"
+                    contenu_doc = _resolve_document_placeholders(str(doc.get("contenu", "") or ""), datetime.date.fromisoformat(doc_date[:10]) if len(doc_date) >= 10 else datetime.date.today())
+
+                    with st.expander(f"{doc_date[:10]} — {doc_type} — {benef_name}"):
+                        st.caption(f"Rédacteur : {interv_name}")
+                        st.write(contenu_doc)
+
+                        edit_key = f"edit_doc_{doc_id}"
+                        if st.checkbox("✏️ Modifier cette transmission", key=edit_key):
+                            current_type_index = doc_types.index(doc_type) if doc_type in doc_types else 0
+                            edit_type = st.selectbox("Type de document", doc_types, index=current_type_index, key=f"edit_type_{doc_id}")
+                            benef_options = list(benef_lbl2.keys())
+                            current_benef_index = benef_options.index(benef_name) if benef_name in benef_options else 0
+                            edit_benef = st.selectbox("Bénéficiaire", benef_options, index=current_benef_index, key=f"edit_benef_{doc_id}")
+                            interv_options = list(interv_lbl2.keys())
+                            current_interv_index = interv_options.index(interv_name) if interv_name in interv_options else 0
+                            edit_interv = st.selectbox("Intervenant rédacteur", interv_options, index=current_interv_index, key=f"edit_interv_{doc_id}")
+                            edit_content = st.text_area("Contenu", value=contenu_doc, height=220, key=f"edit_content_{doc_id}")
+                            if st.button("💾 Enregistrer les modifications", key=f"save_doc_{doc_id}"):
+                                payload_doc = {
+                                    "type_document": edit_type,
+                                    "beneficiaire_id": benef_lbl2[edit_benef],
+                                    "intervenant_id": interv_lbl2[edit_interv],
+                                    "contenu": _resolve_document_placeholders(edit_content),
+                                }
+                                if sb_update("documents_transmissions", payload_doc, "id", doc_id):
+                                    audit("UPDATE_DOCUMENT", "documents_transmissions", doc_id)
+                                    st.success("Transmission mise à jour.")
+                                    st.rerun()
+
+                        try:
+                            date_pdf = datetime.date.fromisoformat(doc_date[:10]).strftime("%d/%m/%Y")
+                        except Exception:
+                            date_pdf = datetime.date.today().strftime("%d/%m/%Y")
+                        try:
+                            hist_pdf = creer_pdf_transmission(
+                                benef_name, interv_name, date_pdf, contenu_doc,
+                                type_document=doc_type, genere_par_ia=True
+                            )
+                            st.download_button(
+                                "⬇️ Télécharger le PDF", hist_pdf,
+                                file_name=f"{doc_type}_{benef_name}.pdf", mime="application/pdf",
+                                key=f"pdf_hist_{doc_id}"
+                            )
+                        except Exception:
+                            logger.exception("PDF historique impossible")
+
+                        st.markdown("**Retirer une transmission saisie par erreur**")
+                        confirm_remove = st.checkbox(
+                            "Je confirme le retrait de cette transmission",
+                            key=f"confirm_delete_doc_{doc_id}",
+                            help="Le retrait est journalisé dans l'audit."
+                        )
+                        if st.button(
+                            "🗑️ Retirer cette transmission",
+                            key=f"delete_doc_{doc_id}",
+                            disabled=not confirm_remove,
+                            type="secondary",
+                        ):
+                            if sb_delete("documents_transmissions", "id", doc_id):
+                                audit("DELETE_DOCUMENT", "documents_transmissions", doc_id)
+                                st.success("Transmission retirée.")
+                                st.rerun()
 
 
     # ============================================================
