@@ -1396,6 +1396,13 @@ Contrôles OmniCoord :
     #  📝 DOCUMENTS & TRANSMISSIONS
     # ============================================================
     elif onglet == "📝 Documents & Transmissions":
+        # Après l'enregistrement d'un document, vider uniquement les zones de saisie
+        # afin d'éviter de réutiliser par erreur la transmission précédente.
+        if st.session_state.pop("reset_document_entry", False):
+            st.session_state.pop("doc_notes_brutes", None)
+            st.session_state.pop("doc_genere", None)
+            st.session_state.pop("doc_texte_final", None)
+
         df_benef2 = sb_select("beneficiaires", {"structure_id": SID, "statut": "Actif"}, order="nom")
         df_interv2 = sb_select("intervenants", {"structure_id": SID}, order="nom")
 
@@ -1413,7 +1420,7 @@ Contrôles OmniCoord :
 
             doc_types = ["Fiche de liaison", "Compte-rendu de visite", "Transmission d'équipe", "Note d'incident"]
             type_doc = st.selectbox("Type", doc_types)
-            notes_brutes = st.text_area("Notes brutes", height=150)
+            notes_brutes = st.text_area("Notes brutes", height=150, key="doc_notes_brutes")
 
             if st.button("✍️ Générer avec l'IA"):
                 if not notes_brutes:
@@ -1433,10 +1440,14 @@ Contrôles OmniCoord :
                     texte_ia = appel_ia_texte(prompt)
                     if texte_ia is not None:
                         st.session_state["doc_genere"] = _resolve_document_placeholders(texte_ia)
+                        # La zone éditable doit refléter la nouvelle génération, pas une ancienne valeur Streamlit.
+                        st.session_state.pop("doc_texte_final", None)
 
             if st.session_state.get("doc_genere"):
                 contenu_initial = _resolve_document_placeholders(st.session_state["doc_genere"])
-                texte_final = st.text_area("Document (modifiable)", value=contenu_initial, height=250)
+                texte_final = st.text_area(
+                    "Document (modifiable)", value=contenu_initial, height=250, key="doc_texte_final"
+                )
                 texte_final = _resolve_document_placeholders(texte_final)
                 col_s, col_p = st.columns(2)
                 with col_s:
@@ -1451,8 +1462,10 @@ Contrôles OmniCoord :
                         })
                         if new_doc:
                             audit("CREATE_DOCUMENT", "documents_transmissions", new_doc.get("id"))
-                            st.success("Document enregistré.")
-                            st.session_state["doc_genere"] = texte_final
+                            # L'enregistrement est terminé : au prochain rendu, repartir sur des zones vides.
+                            st.session_state["reset_document_entry"] = True
+                            st.toast("Document enregistré.", icon="✅")
+                            st.rerun()
                 with col_p:
                     try:
                         pdf_b = creer_pdf_transmission(
