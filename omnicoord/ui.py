@@ -501,6 +501,35 @@ def render():
                                                             st.success("Saisie corrigée.")
                                                             st.rerun()
 
+                                        st.markdown("---")
+                                        confirm_remove_h = st.checkbox(
+                                            "Confirmer le retrait de cette habilitation",
+                                            key=f"confirm_remove_h_{hb['id']}",
+                                            help=(
+                                                "À utiliser pour corriger une saisie erronée ou un doublon. "
+                                                "Un renouvellement normal doit rester dans l'historique."
+                                            ),
+                                        )
+                                        if st.button(
+                                            "🗑️ Retirer cette habilitation",
+                                            key=f"remove_h_{hb['id']}",
+                                            disabled=not confirm_remove_h,
+                                            type="secondary",
+                                        ):
+                                            if sb_delete("habilitations", "id", str(hb["id"])):
+                                                audit(
+                                                    "DELETE_HABILITATION",
+                                                    "habilitations",
+                                                    str(hb["id"]),
+                                                    {
+                                                        "intervenant_id": str(row["id"]),
+                                                        "type_canonique": canonicalize_habilitation(hb.get("type_habilitation")),
+                                                        "motif": "correction_saisie",
+                                                    },
+                                                )
+                                                st.success("Habilitation retirée de la fiche.")
+                                                st.rerun()
+
                             st.markdown("#### ➕ Ajouter / renouveler une habilitation")
                             mode_key = f"new_hab_mode_{row['id']}"
                             mode_h = st.radio("Validité", ["Avec date d'expiration", "Valide sans date d'expiration"], horizontal=True, key=mode_key)
