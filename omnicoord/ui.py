@@ -51,6 +51,35 @@ chiffrer_mdp_mail = core.chiffrer_mdp_mail
 logger = logging.getLogger("omnicoord.ui")
 
 
+INTERVENTION_STATUSES = ["Planifié", "Réalisé", "Absence", "Annulé", "Urgence à pourvoir"]
+
+
+def _intervention_status_color(status: str) -> str:
+    return {
+        "Planifié": "#4c8dfa",
+        "Urgence à pourvoir": "#e0554f",
+        "Absence": "#e07a3f",
+        "Réalisé": "#3fae74",
+        "Annulé": "#8996a3",
+    }.get(str(status or ""), "#8996a3")
+
+
+def _intervention_duration_hours(start, end) -> float:
+    sm, em = _time_minutes(start), _time_minutes(end)
+    if sm is None or em is None or em <= sm:
+        return 0.0
+    return (em - sm) / 60.0
+
+
+def _status_counts_as_planned(status: str) -> bool:
+    # Une absence reste une heure qui avait été planifiée. Une annulation, non.
+    return str(status or "") != "Annulé"
+
+
+def _status_counts_as_realized(status: str) -> bool:
+    return str(status or "") == "Réalisé"
+
+
 def _split_experience_softskills(value):
     """Sépare le parcours des observations soft skills stockées historiquement dans le même champ."""
     text = str(value or "")
@@ -244,7 +273,7 @@ def _dashboard_collect_checks(SID):
             active_mask & work["_date"].notna() & (work["_date"] >= today) & (work["_date"] <= in_7d)
         ].copy()
         counters["interventions_7j"] = len(iv_upcoming)
-        counters["urgences"] = int((work.get("statut", pd.Series(index=work.index, dtype=str)).astype(str) == "Urgence à pourvoir").sum())
+        counters["urgences"] = int(work.get("statut", pd.Series(index=work.index, dtype=str)).astype(str).isin(["Urgence à pourvoir", "Absence"]).sum())
 
         for _, row in work.iterrows():
             statut = str(row.get("statut", "") or "")
@@ -264,10 +293,16 @@ def _dashboard_collect_checks(SID):
                     f"🚨 Intervention <b>non couverte</b> : {date_fr(date_val, 'court')} "
                     f"{h(str(start))}–{h(str(end))} ({h(str(row.get('type_intervention', '')) )}) — {bname}"
                 )
+            elif statut == "Absence":
+                absent_name = h(interv_by_id.get(str(row.get("intervenant_id", "") or ""), {}).get("nom", "Intervenant non précisé"))
+                critical.append(
+                    f"🚨 <b>Absence intervenant</b> : {absent_name} — {date_fr(date_val, 'court')} "
+                    f"{h(str(start))}–{h(str(end))} chez {bname}. Remplacement à organiser."
+                )
 
             # Contrôles des affectations à venir : disponibilité + habilitations requises.
             iid = str(row.get("intervenant_id", "") or "")
-            if iid and date_val >= today and statut not in ("Annulé", "Urgence à pourvoir"):
+            if iid and date_val >= today and statut not in ("Annulé", "Urgence à pourvoir", "Absence"):
                 person = interv_by_id.get(iid)
                 if person and person.get("dispo") == "Indisponible":
                     critical.append(
@@ -297,7 +332,7 @@ def _dashboard_collect_checks(SID):
         if not iv_upcoming.empty and "intervenant_id" in iv_upcoming.columns:
             assigned = iv_upcoming[
                 iv_upcoming["intervenant_id"].notna() &
-                ~iv_upcoming.get("statut", pd.Series(index=iv_upcoming.index, dtype=str)).astype(str).isin(["Annulé", "Urgence à pourvoir"])
+                ~iv_upcoming.get("statut", pd.Series(index=iv_upcoming.index, dtype=str)).astype(str).isin(["Annulé", "Urgence à pourvoir", "Absence"])
             ].copy()
             for (iid, day), grp in assigned.groupby([assigned["intervenant_id"].astype(str), "_date"]):
                 rows = list(grp.to_dict("records"))
@@ -1629,7 +1664,7 @@ Contrôles OmniCoord :
                         else:
                             cell = ""
                             for _, iv in ivs.iterrows():
-                                css = " urgence" if iv["statut"]=="Urgence à pourvoir" else (" realise" if iv["statut"]=="Réalisé" else (" annule" if iv["statut"]=="Annulé" else ""))
+                                css = " urgence" if iv["statut"] in ("Urgence à pourvoir", "Absence") else (" realise" if iv["statut"]=="Réalisé" else (" annule" if iv["statut"]=="Annulé" else ""))
                                 b = h(benef_noms.get(str(iv.get("beneficiaire_id","")), "—"))
                                 cell += f'<div class="planning-cell{css}"><b>{h(str(iv["heure_debut"]))}–{h(str(iv["heure_fin"]))}</b><br>{b}<br><span style="color:#8996a3;font-size:11px;">{h(str(iv["type_intervention"]))}</span></div>'
                             row_html += f'<td>{cell}</td>'
@@ -1713,45 +1748,150 @@ Contrôles OmniCoord :
                             except DatabaseError:
                                 st.error("Impossible de vérifier les conflits de planning.")
 
-            # Interventions à venir
+            # Interventions à venir + correction manuelle
             st.markdown("### 📋 Interventions à venir")
+            st.caption("Chaque intervention peut être corrigée manuellement. Les changements sont contrôlés et journalisés.")
             df_plan = sb_select("interventions", {"structure_id": SID}, order="date_intervention")
             if not df_plan.empty:
-                df_plan["date_intervention"] = pd.to_datetime(df_plan["date_intervention"]).dt.date
-                df_plan = df_plan[df_plan["date_intervention"] >= datetime.date.today()]
+                df_plan["date_intervention"] = pd.to_datetime(df_plan["date_intervention"], errors="coerce").dt.date
+                df_plan = df_plan[df_plan["date_intervention"].notna() & (df_plan["date_intervention"] >= datetime.date.today())]
                 benef_noms2 = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_benef3.iterrows()}
                 interv_noms2 = {}
+                interv_options2 = {"À pourvoir / Non affecté": None}
                 for _, r in df_interv3.iterrows():
                     display_name = f"{r['prenom']} {r['nom']}"
+                    canonical_id = str(r["id"])
+                    interv_options2[display_name] = canonical_id
                     for rid in (r.get("_intervenant_ids") or [r["id"]]):
                         interv_noms2[str(rid)] = display_name
 
+                benef_options2 = {f"{r['prenom']} {r['nom']}": str(r["id"]) for _, r in df_benef3.iterrows()}
+                benef_id_to_label2 = {v: k for k, v in benef_options2.items()}
+                interv_id_to_label2 = {str(v): k for k, v in interv_options2.items() if v is not None}
+
+                df_habs_edit = sb_select("habilitations", {"structure_id": SID})
+                hab_edit_options = set(CANONICAL_HABILITATIONS)
+                if not df_habs_edit.empty and "type_habilitation" in df_habs_edit.columns:
+                    hab_edit_options.update(canonicalize_habilitation(v) for v in df_habs_edit["type_habilitation"].dropna().astype(str).tolist())
+                hab_edit_options = sorted(hab_edit_options)
+
                 for _, row in df_plan.iterrows():
-                    coul = {"Planifié":"#4c8dfa","Urgence à pourvoir":"#e0554f","Réalisé":"#3fae74","Annulé":"#8996a3"}.get(row["statut"], "#8996a3")
-                    b = h(benef_noms2.get(str(row.get("beneficiaire_id","")), "—"))
-                    iv = h(interv_noms2.get(str(row.get("intervenant_id","")), "Non assigné"))
-                    ci, ca = st.columns([4, 1])
-                    with ci:
-                        st.markdown(f"""
-                            <div class="oc-card" style="border-left-color:{coul}; padding:12px 16px;">
-                                <b>{row['date_intervention']} — {h(str(row['heure_debut']))} à {h(str(row['heure_fin']))}</b> · {h(str(row['type_intervention']))}<br>
-                                <span style="color:#b8c2cc;">👤 {b} • 🧑‍⚕️ {iv} •
-                                <span class="oc-badge" style="background:{coul}; padding:2px 10px;">{h(str(row['statut']))}</span></span>
-                            </div>
-                        """, unsafe_allow_html=True)
-                    with ca:
-                        if row["statut"] == "Planifié":
-                            if st.button("✅ Réalisée", key=f"r_{row['id']}"):
-                                sb_update("interventions", {"statut": "Réalisé"}, "id", str(row["id"]))
+                    row_id = str(row["id"])
+                    statut_cur = str(row.get("statut", "Planifié") or "Planifié")
+                    coul = _intervention_status_color(statut_cur)
+                    b_label = benef_noms2.get(str(row.get("beneficiaire_id", "")), "—")
+                    i_label = interv_noms2.get(str(row.get("intervenant_id", "")), "Non assigné")
+                    st.markdown(f"""
+                        <div class="oc-card" style="border-left-color:{coul}; padding:12px 16px;">
+                            <b>{h(str(row['date_intervention']))} — {h(str(row['heure_debut']))} à {h(str(row['heure_fin']))}</b> · {h(str(row['type_intervention']))}<br>
+                            <span style="color:#b8c2cc;">👤 {h(b_label)} • 🧑‍⚕️ {h(i_label)} •
+                            <span class="oc-badge" style="background:{coul}; padding:2px 10px;">{h(statut_cur)}</span></span>
+                        </div>
+                    """, unsafe_allow_html=True)
+
+                    qa, qb, qc = st.columns(3)
+                    with qa:
+                        has_assignee = bool(str(row.get("intervenant_id", "") or "").strip())
+                        if has_assignee and statut_cur == "Planifié" and st.button("✅ Marquer réalisée", key=f"quick_done_{row_id}"):
+                            if sb_update("interventions", {"statut": "Réalisé"}, "id", row_id):
+                                audit("UPDATE_INTERVENTION_STATUS", "interventions", row_id, {"from": statut_cur, "to": "Réalisé"})
+                                st.success("Intervention marquée réalisée.")
                                 st.rerun()
-                        if row["statut"] not in ["Urgence à pourvoir","Annulé","Réalisé"]:
-                            if st.button("🚨 Absence", key=f"a_{row['id']}"):
-                                sb_update("interventions", {"statut": "Urgence à pourvoir", "intervenant_id": None}, "id", str(row["id"]))
+                    with qb:
+                        if has_assignee and statut_cur == "Planifié" and st.button("🚨 Signaler une absence", key=f"quick_abs_{row_id}"):
+                            if sb_update("interventions", {"statut": "Absence"}, "id", row_id):
+                                audit("UPDATE_INTERVENTION_STATUS", "interventions", row_id, {"from": statut_cur, "to": "Absence"})
+                                st.warning("Absence enregistrée. L'intervention apparaît maintenant dans les urgences de remplacement.")
                                 st.rerun()
+                    with qc:
+                        if statut_cur != "Annulé" and st.button("🚫 Annuler", key=f"quick_cancel_{row_id}"):
+                            if sb_update("interventions", {"statut": "Annulé"}, "id", row_id):
+                                audit("UPDATE_INTERVENTION_STATUS", "interventions", row_id, {"from": statut_cur, "to": "Annulé"})
+                                st.rerun()
+
+                    with st.expander(f"✏️ Modifier l'intervention — {row['date_intervention']} {row.get('heure_debut','')}", expanded=False):
+                        cur_b_id = str(row.get("beneficiaire_id", "") or "")
+                        b_labels = list(benef_options2.keys())
+                        cur_b_label = benef_id_to_label2.get(cur_b_id, b_labels[0] if b_labels else None)
+
+                        i_labels = list(interv_options2.keys())
+                        cur_i_id = str(row.get("intervenant_id", "") or "")
+                        cur_i_label = interv_id_to_label2.get(cur_i_id, "À pourvoir / Non affecté")
+
+                        type_options = ["Aide à la toilette", "Aide au repas", "Ménage", "Accompagnement", "Soins", "Autre"]
+                        cur_type = str(row.get("type_intervention", "") or "Autre")
+                        if cur_type not in type_options:
+                            type_options.append(cur_type)
+
+                        status_options = INTERVENTION_STATUSES.copy()
+                        if statut_cur not in status_options:
+                            status_options.append(statut_cur)
+
+                        req_current = [canonicalize_habilitation(x) for x in required_habilitations(row.to_dict())]
+                        req_current = [x for x in req_current if x in hab_edit_options]
+
+                        with st.form(f"edit_intervention_{row_id}"):
+                            ec1, ec2 = st.columns(2)
+                            e_benef = ec1.selectbox("Bénéficiaire", b_labels, index=b_labels.index(cur_b_label) if cur_b_label in b_labels else 0, key=f"edit_b_{row_id}")
+                            e_interv = ec2.selectbox("Intervenant", i_labels, index=i_labels.index(cur_i_label) if cur_i_label in i_labels else 0, key=f"edit_i_{row_id}")
+                            ec3, ec4, ec5 = st.columns(3)
+                            e_type = ec3.selectbox("Type", type_options, index=type_options.index(cur_type), key=f"edit_type_{row_id}")
+                            e_date = ec4.date_input("Date", value=row["date_intervention"], key=f"edit_date_{row_id}")
+                            e_status = ec5.selectbox("Statut", status_options, index=status_options.index(statut_cur), key=f"edit_status_{row_id}")
+                            ec6, ec7 = st.columns(2)
+                            hd_min = _time_minutes(row.get("heure_debut"))
+                            hf_min = _time_minutes(row.get("heure_fin"))
+                            default_hd = datetime.time((hd_min or 0)//60, (hd_min or 0)%60)
+                            default_hf = datetime.time((hf_min or 60)//60 % 24, (hf_min or 60)%60)
+                            e_hd = ec6.time_input("Heure début", value=default_hd, key=f"edit_hd_{row_id}")
+                            e_hf = ec7.time_input("Heure fin", value=default_hf, key=f"edit_hf_{row_id}")
+                            e_habs = st.multiselect("Habilitations obligatoires", hab_edit_options, default=req_current, key=f"edit_habs_{row_id}")
+                            existing_notes = str(row.get("notes", "") or "")
+                            # Ne pas exposer le marqueur technique des habilitations dans le champ notes.
+                            if "[HABILITATIONS_REQUISES:" in existing_notes:
+                                existing_notes = existing_notes.split("[HABILITATIONS_REQUISES:", 1)[0].rstrip()
+                            e_notes = st.text_area("Notes", value=existing_notes, key=f"edit_notes_{row_id}")
+                            save_edit = st.form_submit_button("💾 Enregistrer les modifications")
+
+                        if save_edit:
+                            try:
+                                if e_hf <= e_hd:
+                                    raise ValidationError("L'heure de fin doit être après l'heure de début.")
+                                new_interv_id = interv_options2[e_interv]
+                                if e_status == "Urgence à pourvoir":
+                                    new_interv_id = None
+                                if e_status in ("Planifié", "Réalisé", "Absence") and not new_interv_id:
+                                    raise ValidationError("Ce statut nécessite de sélectionner un intervenant.")
+                                if new_interv_id and e_status not in ("Annulé", "Absence"):
+                                    ensure_no_intervenant_conflict(
+                                        SID, new_interv_id, e_date, e_hd, e_hf, exclude_intervention_id=row_id
+                                    )
+                                payload = {
+                                    "beneficiaire_id": benef_options2[e_benef],
+                                    "intervenant_id": new_interv_id,
+                                    "type_intervention": e_type,
+                                    "date_intervention": e_date.isoformat(),
+                                    "heure_debut": e_hd.strftime("%H:%M:%S"),
+                                    "heure_fin": e_hf.strftime("%H:%M:%S"),
+                                    "statut": e_status,
+                                    "notes": encode_required_habilitations(e_notes, e_habs),
+                                }
+                                if sb_update("interventions", payload, "id", row_id):
+                                    audit("UPDATE_INTERVENTION", "interventions", row_id, {"statut": e_status, "date": e_date.isoformat()})
+                                    st.success("Intervention mise à jour.")
+                                    st.rerun()
+                            except ValidationError as exc:
+                                st.error(str(exc))
+                            except DatabaseError:
+                                st.error("Impossible de vérifier les conflits de planning.")
+            else:
+                st.info("Aucune intervention à venir.")
 
         with tab_urg:
             st.caption("OmniCoord filtre d'abord les contraintes bloquantes, puis classe les personnes réellement affectables.")
-            df_urgs = sb_select("interventions", {"structure_id": SID, "statut": "Urgence à pourvoir"}, order="date_intervention")
+            df_urgs = sb_select("interventions", {"structure_id": SID}, order="date_intervention")
+            if not df_urgs.empty:
+                df_urgs = df_urgs[df_urgs["statut"].astype(str).isin(["Urgence à pourvoir", "Absence"])].copy()
 
             if df_urgs.empty:
                 st.success("✅ Aucune urgence en cours.")
@@ -1780,6 +1920,9 @@ Contrôles OmniCoord :
                             st.error("Impossible de charger les données nécessaires au remplacement.")
 
                     results = st.session_state.get(key_results, [])
+                    if str(urg.get("statut", "")) == "Absence" and urg.get("intervenant_id"):
+                        absent_id = str(urg.get("intervenant_id"))
+                        results = [r for r in results if str(r.get("intervenant_id", "")) != absent_id]
                     eligible = [r for r in results if r.get("eligible")]
                     blocked = [r for r in results if not r.get("eligible")]
 
@@ -1957,63 +2100,112 @@ Contrôles OmniCoord :
 
 
     # ============================================================
-    #  📊 SUIVI DES HEURES (NOUVEAU MODULE)
+    #  📊 SUIVI DES HEURES
     # ============================================================
     elif onglet == "📊 Suivi des heures":
-        st.caption("Suivi mensuel des heures planifiées vs réalisées par intervenant.")
+        st.caption("Suivi mensuel des heures planifiées, réalisées, absences et annulations par intervenant.")
 
         df_interv_h = sb_select("intervenants", {"structure_id": SID}, order="nom")
+        if not df_interv_h.empty and "deleted_at" in df_interv_h.columns:
+            df_interv_h = df_interv_h[df_interv_h["deleted_at"].isna()].copy()
         df_iv_all = sb_select("interventions", {"structure_id": SID})
+        df_benef_h = sb_select("beneficiaires", {"structure_id": SID})
 
-        if df_interv_h.empty or df_iv_all.empty:
+        if df_iv_all.empty:
             st.info("Aucune donnée disponible. Planifiez des interventions.")
         else:
-            df_iv_all["date_intervention"] = pd.to_datetime(df_iv_all["date_intervention"])
+            df_iv_all = df_iv_all.copy()
+            df_iv_all["date_intervention"] = pd.to_datetime(df_iv_all["date_intervention"], errors="coerce")
+            df_iv_all = df_iv_all[df_iv_all["date_intervention"].notna()].copy()
             df_iv_all["mois"] = df_iv_all["date_intervention"].dt.to_period("M")
-            df_iv_all["duree_h"] = df_iv_all.apply(
-                lambda r: (
-                    datetime.datetime.strptime(str(r["heure_fin"]), "%H:%M:%S") -
-                    datetime.datetime.strptime(str(r["heure_debut"]), "%H:%M:%S")
-                ).seconds / 3600 if pd.notna(r["heure_debut"]) and pd.notna(r["heure_fin"]) else 0,
-                axis=1
-            )
+            df_iv_all["duree_h"] = df_iv_all.apply(lambda r: _intervention_duration_hours(r.get("heure_debut"), r.get("heure_fin")), axis=1)
 
-            interv_noms_h = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_interv_h.iterrows()}
+            interv_noms_h = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_interv_h.iterrows()} if not df_interv_h.empty else {}
+            benef_noms_h = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_benef_h.iterrows()} if not df_benef_h.empty else {}
             df_iv_all["intervenant_nom"] = df_iv_all["intervenant_id"].apply(lambda x: interv_noms_h.get(str(x), "Non assigné"))
+            df_iv_all["beneficiaire_nom"] = df_iv_all["beneficiaire_id"].apply(lambda x: benef_noms_h.get(str(x), "Bénéficiaire inconnu"))
 
-            # Filtre mois
             mois_dispo = df_iv_all["mois"].dropna().unique()
             mois_dispo_str = sorted([str(m) for m in mois_dispo], reverse=True)
             mois_sel = st.selectbox("Mois", mois_dispo_str) if mois_dispo_str else None
 
             if mois_sel:
-                df_mois = df_iv_all[df_iv_all["mois"].astype(str) == mois_sel]
-                df_resume = df_mois.groupby("intervenant_nom").agg(
+                df_mois = df_iv_all[df_iv_all["mois"].astype(str) == mois_sel].copy()
+                df_mois["heures_planifiees_calc"] = df_mois.apply(
+                    lambda r: r["duree_h"] if _status_counts_as_planned(r.get("statut")) else 0.0, axis=1
+                )
+                df_mois["heures_realisees_calc"] = df_mois.apply(
+                    lambda r: r["duree_h"] if _status_counts_as_realized(r.get("statut")) else 0.0, axis=1
+                )
+                df_mois["absence_count"] = (df_mois["statut"].astype(str) == "Absence").astype(int)
+                df_mois["annule_count"] = (df_mois["statut"].astype(str) == "Annulé").astype(int)
+                df_mois["a_pourvoir_count"] = (df_mois["statut"].astype(str) == "Urgence à pourvoir").astype(int)
+
+                df_resume = df_mois.groupby("intervenant_nom", dropna=False).agg(
                     nb_interventions=("id", "count"),
-                    heures_planifiees=("duree_h", "sum"),
-                    heures_realisees=("duree_h", lambda x: x[df_mois.loc[x.index, "statut"] == "Réalisé"].sum())
+                    heures_planifiees=("heures_planifiees_calc", "sum"),
+                    heures_realisees=("heures_realisees_calc", "sum"),
+                    absences=("absence_count", "sum"),
+                    annulees=("annule_count", "sum"),
+                    a_pourvoir=("a_pourvoir_count", "sum"),
                 ).reset_index()
 
                 st.markdown(f"### Mois de {mois_sel}")
-                col_t1, col_t2, col_t3 = st.columns(3)
-                col_t1.metric("Total interventions", int(df_resume["nb_interventions"].sum()))
-                col_t2.metric("Heures planifiées", f"{df_resume['heures_planifiees'].sum():.1f}h")
-                col_t3.metric("Heures réalisées", f"{df_resume['heures_realisees'].sum():.1f}h")
+                col_t1, col_t2, col_t3, col_t4 = st.columns(4)
+                col_t1.metric("Total interventions", len(df_mois))
+                col_t2.metric("Heures planifiées", f"{df_mois['heures_planifiees_calc'].sum():.1f}h")
+                col_t3.metric("Heures réalisées", f"{df_mois['heures_realisees_calc'].sum():.1f}h")
+                col_t4.metric("Absences", int(df_mois["absence_count"].sum()))
 
-                st.dataframe(
-                    df_resume.rename(columns={
-                        "intervenant_nom": "Intervenant",
-                        "nb_interventions": "Nb interventions",
-                        "heures_planifiees": "Heures planifiées",
-                        "heures_realisees": "Heures réalisées"
-                    }),
-                    use_container_width=True, hide_index=True
+                display_resume = df_resume.rename(columns={
+                    "intervenant_nom": "Intervenant",
+                    "nb_interventions": "Nb interventions",
+                    "heures_planifiees": "Heures planifiées",
+                    "heures_realisees": "Heures réalisées",
+                    "absences": "Absences",
+                    "annulees": "Annulées",
+                    "a_pourvoir": "À pourvoir",
+                })
+                st.dataframe(display_resume, use_container_width=True, hide_index=True)
+
+                with st.expander("✏️ Mettre à jour les interventions du mois", expanded=True):
+                    st.caption("Permet de corriger le statut d'une intervention sans quitter le suivi des heures.")
+                    for _, ivr in df_mois.sort_values(["date_intervention", "heure_debut"]).iterrows():
+                        iid = str(ivr["id"])
+                        date_label = ivr["date_intervention"].date().strftime("%d/%m/%Y")
+                        status_cur = str(ivr.get("statut", "Planifié") or "Planifié")
+                        line1, line2 = st.columns([4, 2])
+                        with line1:
+                            st.markdown(
+                                f"**{date_label} — {h(str(ivr.get('heure_debut','')))} à {h(str(ivr.get('heure_fin','')))}** · "
+                                f"{h(str(ivr.get('type_intervention','')))}  \n"
+                                f"{h(str(ivr.get('beneficiaire_nom','')))} · {h(str(ivr.get('intervenant_nom','')))}"
+                            )
+                        with line2:
+                            opts = INTERVENTION_STATUSES.copy()
+                            if status_cur not in opts:
+                                opts.append(status_cur)
+                            new_status = st.selectbox(
+                                "Statut", opts, index=opts.index(status_cur), key=f"hours_status_{iid}", label_visibility="collapsed"
+                            )
+                            if st.button("💾 Mettre à jour", key=f"hours_save_{iid}", use_container_width=True):
+                                current_assignee = str(ivr.get("intervenant_id", "") or "").strip()
+                                if new_status in ("Planifié", "Réalisé", "Absence") and not current_assignee:
+                                    st.warning("Affectez d'abord un intervenant depuis Planifications & Urgences pour utiliser ce statut.")
+                                else:
+                                    payload = {"statut": new_status}
+                                    if new_status == "Urgence à pourvoir":
+                                        payload["intervenant_id"] = None
+                                    if sb_update("interventions", payload, "id", iid):
+                                        audit("UPDATE_INTERVENTION_STATUS", "interventions", iid, {"from": status_cur, "to": new_status, "source": "suivi_heures"})
+                                        st.success("Statut mis à jour.")
+                                        st.rerun()
+                        st.divider()
+
+                csv = display_resume.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    "⬇️ Exporter en CSV", data=csv, file_name=f"heures_{mois_sel}.csv", mime="text/csv"
                 )
-
-                # Export CSV
-                csv = df_resume.to_csv(index=False).encode("utf-8")
-                st.download_button("⬇️ Exporter en CSV", data=csv,
-                                   file_name=f"heures_{mois_sel}.csv", mime="text/csv")
 
 
     # ============================================================
