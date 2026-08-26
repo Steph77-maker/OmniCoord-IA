@@ -206,11 +206,15 @@ def _dashboard_collect_checks(SID):
                 continue
             nom = h(interv_by_id.get(iid, {}).get("nom", "Inconnu"))
             typ = h(canonicalize_habilitation(hb.get("type_habilitation", "")))
+            # Certains libellés canoniques commencent déjà par « Habilitation ».
+            # On évite donc un rendu du type « Habilitation Habilitation gestes et postures ».
+            typ_label = typ if typ.lower().startswith("habilitation ") else f"Habilitation {typ}"
             if exp < today:
-                critical.append(f"🔴 Habilitation <b>{typ}</b> de <b>{nom}</b> expirée depuis le {date_fr(exp, 'court')}")
+                critical.append(f"🔴 <b>{typ_label}</b> de <b>{nom}</b> expirée depuis le {date_fr(exp, 'court')}")
             elif exp <= in_60d:
                 days = (exp - today).days
-                warning.append(f"🟠 Habilitation <b>{typ}</b> de <b>{nom}</b> expire dans <b>{days} j</b> ({date_fr(exp, 'court')})")
+                day_word = "jour" if days == 1 else "jours"
+                warning.append(f"🟠 <b>{typ_label}</b> de <b>{nom}</b> expire dans <b>{days} {day_word}</b> ({date_fr(exp, 'court')})")
 
     # Interventions : fenêtre opérationnelle et anomalies de données.
     iv_upcoming = pd.DataFrame()
