@@ -21,6 +21,7 @@ from .replacement_service import (
 )
 from .exceptions import ValidationError, DatabaseError
 from .cv_service import analyse_cv
+from .compliance import CANONICAL_HABILITATIONS, canonical_key, canonicalize_habilitation, duplicate_habilitation_reason
 
 # Aliases conservés pour limiter les changements de comportement pendant la migration.
 sb = core.sb
@@ -454,7 +455,7 @@ def render():
                                     st.rerun()
 
                         with tab_habs_i:
-                            hab_types = ["Diplôme AES","DEAES","PSC1 / SST","Permis B","Visite médecine du travail","Habilitation gestes et postures","AFGSU","Autre"]
+                            hab_types = CANONICAL_HABILITATIONS
                             hab_i = pd.DataFrame()
                             if not df_habs_vivier.empty and "intervenant_id" in df_habs_vivier.columns:
                                 hab_i = df_habs_vivier[df_habs_vivier["intervenant_id"].astype(str) == str(row["id"])].copy()
@@ -475,12 +476,13 @@ def render():
                                         statut_h = f"🟠 Valide jusqu'au {d_exp.strftime('%d/%m/%Y')}"
                                     else:
                                         statut_h = f"🟢 Valide jusqu'au {d_exp.strftime('%d/%m/%Y')}"
-                                    with st.expander(f"{hb.get('type_habilitation','Habilitation')} — {statut_h}"):
+                                    with st.expander(f"{canonicalize_habilitation(hb.get('type_habilitation','Habilitation'))} — {statut_h}"):
                                         st.write(f"Date d'obtention : {hb.get('date_obtention') or 'Non renseignée'}")
                                         correction = st.checkbox("Corriger cette saisie", key=f"corr_h_{hb['id']}")
                                         if correction:
                                             with st.form(f"corr_hab_{hb['id']}"):
-                                                tcur = hb.get("type_habilitation") if hb.get("type_habilitation") in hab_types else "Autre"
+                                                tcur = canonicalize_habilitation(hb.get("type_habilitation"))
+                                                tcur = tcur if tcur in hab_types else "Autre"
                                                 c_type = st.selectbox("Type", hab_types, index=hab_types.index(tcur), key=f"ct_{hb['id']}")
                                                 obt0 = pd.to_datetime(hb.get("date_obtention"), errors="coerce")
                                                 obt0 = obt0.date() if pd.notna(obt0) else datetime.date.today()
@@ -493,7 +495,7 @@ def render():
                                                     if c_exp is not None and c_exp <= c_obt:
                                                         st.error("La date d'expiration doit être après la date d'obtention.")
                                                     else:
-                                                        p_h = {"type_habilitation": c_type, "date_obtention": c_obt.isoformat(), "date_expiration": NO_EXPIRY_DATE.isoformat() if c_sans else c_exp.isoformat()}
+                                                        p_h = {"type_habilitation": canonicalize_habilitation(c_type), "date_obtention": c_obt.isoformat(), "date_expiration": NO_EXPIRY_DATE.isoformat() if c_sans else c_exp.isoformat()}
                                                         if sb_update("habilitations", p_h, "id", hb["id"]):
                                                             audit("UPDATE_HABILITATION", "habilitations", str(hb["id"]))
                                                             st.success("Saisie corrigée.")
@@ -513,15 +515,22 @@ def render():
                                 if n_exp is not None and n_exp <= n_obt:
                                     st.error("La date d'expiration doit être après la date d'obtention.")
                                 else:
-                                    new_h = sb_insert("habilitations", {
-                                        "structure_id": SID, "intervenant_id": str(row["id"]),
-                                        "type_habilitation": n_type, "date_obtention": n_obt.isoformat(),
-                                        "date_expiration": n_exp.isoformat() if n_exp is not None else NO_EXPIRY_DATE.isoformat(),
-                                    })
-                                    if new_h:
-                                        audit("CREATE_HABILITATION", "habilitations", new_h.get("id"), {"intervenant_id": str(row["id"])})
-                                        st.success("Habilitation ajoutée à la fiche. Le moteur de matching la prendra en compte automatiquement.")
-                                        st.rerun()
+                                    existing_records = hab_i.to_dict("records") if not hab_i.empty else []
+                                    duplicate_reason = duplicate_habilitation_reason(
+                                        existing_records, n_type, n_obt, permanent=n_exp is None
+                                    )
+                                    if duplicate_reason:
+                                        st.warning(duplicate_reason)
+                                    else:
+                                        new_h = sb_insert("habilitations", {
+                                            "structure_id": SID, "intervenant_id": str(row["id"]),
+                                            "type_habilitation": canonicalize_habilitation(n_type), "date_obtention": n_obt.isoformat(),
+                                            "date_expiration": n_exp.isoformat() if n_exp is not None else NO_EXPIRY_DATE.isoformat(),
+                                        })
+                                        if new_h:
+                                            audit("CREATE_HABILITATION", "habilitations", new_h.get("id"), {"intervenant_id": str(row["id"]), "type_canonique": canonicalize_habilitation(n_type)})
+                                            st.success("Habilitation ajoutée à la fiche. Le moteur de matching la prendra en compte automatiquement.")
+                                            st.rerun()
 
         with tab_ajout:
             with st.form("form_ajout_interv", clear_on_submit=True):
@@ -601,7 +610,8 @@ def render():
 
             data_cv = st.session_state.get("cv_analysis")
             if data_cv:
-                detected = data_cv.get("habilitations_detectees") or []
+                detected = [canonicalize_habilitation(v) for v in (data_cv.get("habilitations_detectees") or [])]
+                detected = list(dict.fromkeys(v for v in detected if v))
                 if detected:
                     st.info("Conformité détectée dans le CV : " + ", ".join(detected) + ". Vérifiez les justificatifs avant de l'enregistrer dans Conformité & Habilitations.")
                 with st.form("form_cv_candidate", clear_on_submit=True):
@@ -1212,14 +1222,10 @@ def render():
                 st.info("Ajoutez au moins un bénéficiaire et un intervenant.")
             else:
                 df_habs_plan = sb_select("habilitations", {"structure_id": SID})
-                hab_catalog = [
-                    "Diplôme AES", "DEAES", "PSC1 / SST", "Permis B",
-                    "Visite médecine du travail", "Habilitation gestes et postures",
-                    "AFGSU", "Autre",
-                ]
+                hab_catalog = CANONICAL_HABILITATIONS
                 hab_options = set(hab_catalog)
                 if not df_habs_plan.empty and "type_habilitation" in df_habs_plan.columns:
-                    hab_options.update(df_habs_plan["type_habilitation"].dropna().astype(str).tolist())
+                    hab_options.update(canonicalize_habilitation(v) for v in df_habs_plan["type_habilitation"].dropna().astype(str).tolist())
                 hab_options = sorted(hab_options)
                 with st.form("form_plan", clear_on_submit=True):
                     c1, c2, c3 = st.columns(3)
@@ -1437,12 +1443,28 @@ def render():
             else:
                 interv_noms4 = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_interv4.iterrows()}
                 df_habs["intervenant_nom"] = df_habs["intervenant_id"].apply(lambda x: interv_noms4.get(str(x), "Inconnu"))
+                df_habs["type_canonique"] = df_habs["type_habilitation"].apply(canonicalize_habilitation)
                 df_habs["date_exp_dt"] = pd.to_datetime(df_habs["date_expiration"], errors="coerce").dt.date
+                df_habs["_date_obt_sort"] = pd.to_datetime(df_habs["date_obtention"], errors="coerce")
 
-                exp = df_habs[df_habs["date_exp_dt"].notna() & (df_habs["date_exp_dt"] < aujourd)]
-                bientot = df_habs[df_habs["date_exp_dt"].notna() & (df_habs["date_exp_dt"] >= aujourd) & (df_habs["date_exp_dt"] <= seuil)]
-                permanent = df_habs[df_habs["date_exp_dt"].isna() | (df_habs["date_exp_dt"] == NO_EXPIRY_DATE)]
-                ok = pd.concat([df_habs[(df_habs["date_exp_dt"] > seuil) & (df_habs["date_exp_dt"] != NO_EXPIRY_DATE)], permanent], ignore_index=False)
+                # Le suivi synthétique ne doit pas compter les anciennes lignes d'un
+                # renouvellement comme des alertes actuelles. On conserve tout l'historique
+                # en base, mais on affiche ici uniquement la saisie la plus récente par
+                # intervenant + type canonique.
+                current_habs = (
+                    df_habs.sort_values(
+                        ["intervenant_id", "type_canonique", "_date_obt_sort"],
+                        ascending=[True, True, False],
+                        na_position="last",
+                    )
+                    .drop_duplicates(["intervenant_id", "type_canonique"], keep="first")
+                    .copy()
+                )
+
+                exp = current_habs[current_habs["date_exp_dt"].notna() & (current_habs["date_exp_dt"] < aujourd)]
+                bientot = current_habs[current_habs["date_exp_dt"].notna() & (current_habs["date_exp_dt"] >= aujourd) & (current_habs["date_exp_dt"] <= seuil)]
+                permanent = current_habs[current_habs["date_exp_dt"].isna() | (current_habs["date_exp_dt"] == NO_EXPIRY_DATE)]
+                ok = pd.concat([current_habs[(current_habs["date_exp_dt"] > seuil) & (current_habs["date_exp_dt"] != NO_EXPIRY_DATE)], permanent], ignore_index=False)
 
                 c1, c2, c3 = st.columns(3)
                 c1.metric("🔴 Expirées", len(exp))
@@ -1452,14 +1474,15 @@ def render():
                 if not exp.empty:
                     st.markdown("#### 🔴 Expirées")
                     for _, hb in exp.iterrows():
-                        st.markdown(f'<div class="oc-card oc-card-alert"><b>{h(hb["intervenant_nom"])}</b> — {h(hb["type_habilitation"])} — expirée le {hb["date_expiration"]}</div>', unsafe_allow_html=True)
+                        st.markdown(f'<div class="oc-card oc-card-alert"><b>{h(hb["intervenant_nom"])}</b> — {h(hb["type_canonique"])} — expirée le {hb["date_expiration"]}</div>', unsafe_allow_html=True)
                 if not bientot.empty:
                     st.markdown("#### 🟠 À renouveler bientôt")
                     for _, hb in bientot.iterrows():
-                        st.markdown(f'<div class="oc-card oc-card-warning"><b>{h(hb["intervenant_nom"])}</b> — {h(hb["type_habilitation"])} — expire le {hb["date_expiration"]}</div>', unsafe_allow_html=True)
+                        st.markdown(f'<div class="oc-card oc-card-warning"><b>{h(hb["intervenant_nom"])}</b> — {h(hb["type_canonique"])} — expire le {hb["date_expiration"]}</div>', unsafe_allow_html=True)
                 if not ok.empty:
                     with st.expander("🟢 À jour"):
-                        ok_display = ok[["intervenant_nom","type_habilitation","date_obtention","date_expiration"]].copy()
+                        ok_display = ok[["intervenant_nom","type_canonique","date_obtention","date_expiration"]].copy()
+                        ok_display = ok_display.rename(columns={"type_canonique": "type_habilitation"})
                         ok_display["date_expiration"] = ok_display["date_expiration"].apply(
                             lambda v: "Valide sans date d'expiration" if (pd.isna(v) or str(v)[:10] == "9999-12-31") else v
                         )
@@ -1478,7 +1501,7 @@ def render():
                 with st.form("form_hab", clear_on_submit=True):
                     interv_lbl4 = {f"{r['prenom']} {r['nom']}": str(r["id"]) for _, r in df_interv4.iterrows()}
                     interv_sel = st.selectbox("Intervenant", list(interv_lbl4.keys()))
-                    type_hab = st.selectbox("Type", ["Diplôme AES","DEAES","PSC1 / SST","Permis B","Visite médecine du travail","Habilitation gestes et postures","AFGSU","Autre"])
+                    type_hab = st.selectbox("Type", CANONICAL_HABILITATIONS)
                     date_obt = st.date_input("Date d'obtention")
                     date_exp = None
                     if validite_mode == "Avec date d'expiration":
@@ -1488,19 +1511,29 @@ def render():
                         if date_exp is not None and date_exp <= date_obt:
                             st.error("La date d'expiration doit être après la date d'obtention.")
                         else:
-                            new_h = sb_insert("habilitations", {
-                                "structure_id": SID,
-                                "intervenant_id": interv_lbl4[interv_sel],
-                                "type_habilitation": type_hab,
-                                "date_obtention": date_obt.isoformat(),
-                                # Sentinelle rétrocompatible : évite d'exiger une migration si
-                                # date_expiration est NOT NULL dans une base déjà déployée.
-                                "date_expiration": date_exp.isoformat() if date_exp is not None else NO_EXPIRY_DATE.isoformat(),
-                            })
-                            if new_h:
-                                audit("CREATE_HABILITATION", "habilitations", new_h.get("id"), {"sans_expiration": date_exp is None})
-                                st.success("Habilitation ajoutée.")
-                                st.rerun()
+                            target_id = interv_lbl4[interv_sel]
+                            existing_records = []
+                            if not df_habs.empty and "intervenant_id" in df_habs.columns:
+                                existing_records = df_habs[df_habs["intervenant_id"].astype(str) == str(target_id)].to_dict("records")
+                            duplicate_reason = duplicate_habilitation_reason(
+                                existing_records, type_hab, date_obt, permanent=date_exp is None
+                            )
+                            if duplicate_reason:
+                                st.warning(duplicate_reason)
+                            else:
+                                new_h = sb_insert("habilitations", {
+                                    "structure_id": SID,
+                                    "intervenant_id": target_id,
+                                    "type_habilitation": canonicalize_habilitation(type_hab),
+                                    "date_obtention": date_obt.isoformat(),
+                                    # Sentinelle rétrocompatible : évite d'exiger une migration si
+                                    # date_expiration est NOT NULL dans une base déjà déployée.
+                                    "date_expiration": date_exp.isoformat() if date_exp is not None else NO_EXPIRY_DATE.isoformat(),
+                                })
+                                if new_h:
+                                    audit("CREATE_HABILITATION", "habilitations", new_h.get("id"), {"sans_expiration": date_exp is None, "type_canonique": canonicalize_habilitation(type_hab)})
+                                    st.success("Habilitation ajoutée.")
+                                    st.rerun()
 
 
     # ============================================================
