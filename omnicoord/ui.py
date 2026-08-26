@@ -1428,7 +1428,7 @@ Contrôles OmniCoord :
                             st.success("Document enregistré.")
                 with col_p:
                     try:
-                        pdf_b = creer_pdf_transmission(benef_ch2, interv_ch2, datetime.date.today().strftime("%d/%m/%Y"), texte_final)
+                        pdf_b = creer_pdf_transmission(benef_ch2, interv_ch2, datetime.date.today().strftime("%d/%m/%Y"), texte_final, type_document=type_doc, genere_par_ia=True)
                         st.download_button("⬇️ PDF", data=pdf_b, file_name=f"{type_doc}_{benef_ch2}.pdf", mime="application/pdf")
                     except Exception:
                         logger.exception("Génération PDF impossible")
