@@ -23,6 +23,14 @@ def _pdf_safe(value) -> str:
     return text.encode("latin-1", errors="replace").decode("latin-1")
 
 
+def _resolve_pdf_placeholders(value: str, date_doc: str) -> str:
+    """Évite qu'un placeholder IA de date atteigne le PDF final."""
+    text = str(value or "")
+    for placeholder in ("[Date du jour]", "[DATE DU JOUR]", "[date du jour]", "{{date_du_jour}}", "{{DATE_DU_JOUR}}"):
+        text = text.replace(placeholder, date_doc)
+    return text
+
+
 class PDFDocument(FPDF):
     def cell(self, w=None, h=None, text="", *args, **kwargs):
         return super().cell(w, h, _pdf_safe(text), *args, **kwargs)
@@ -64,6 +72,7 @@ def creer_pdf_transmission(
     pdf.set_font("Helvetica", "", 11)
     pdf.cell(0, 8, f"Bénéficiaire : {beneficiaire_nom}", new_x="LMARGIN", new_y="NEXT")
     pdf.cell(0, 8, f"Intervenant : {intervenant_nom}", new_x="LMARGIN", new_y="NEXT")
+    contenu = _resolve_pdf_placeholders(contenu, date_doc)
     pdf.ln(4); pdf.set_font("Helvetica", "", 10); pdf.multi_cell(0, 6, contenu)
 
     if genere_par_ia:
