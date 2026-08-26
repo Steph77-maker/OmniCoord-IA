@@ -43,14 +43,47 @@ class PDFDocument(FPDF):
         self.set_text_color(137, 150, 163)
         self.cell(0, 10, f"Document généré le {datetime.date.today().strftime('%d/%m/%Y')} — OmniCoord IA", align="C")
 
-def creer_pdf_transmission(beneficiaire_nom: str, intervenant_nom: str, date_doc: str, contenu: str) -> bytes:
+def creer_pdf_transmission(
+    beneficiaire_nom: str,
+    intervenant_nom: str,
+    date_doc: str,
+    contenu: str,
+    type_document: str = "Fiche de liaison",
+    genere_par_ia: bool = False,
+) -> bytes:
+    """Génère un PDF de document/transmission.
+
+    ``type_document`` pilote le titre réel du PDF. ``genere_par_ia`` ajoute une
+    mention de transparence et une zone de validation humaine uniquement lorsque
+    le texte a été rédigé ou reformulé avec l'assistance de l'IA.
+    """
     pdf = PDFDocument(); pdf.add_page()
     pdf.set_font("Helvetica", "B", 12); pdf.set_text_color(20, 20, 20)
-    pdf.cell(0, 8, f"Fiche de liaison — {date_doc}", new_x="LMARGIN", new_y="NEXT")
+    titre = (type_document or "Document").strip()
+    pdf.cell(0, 8, f"{titre} — {date_doc}", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 11)
     pdf.cell(0, 8, f"Bénéficiaire : {beneficiaire_nom}", new_x="LMARGIN", new_y="NEXT")
     pdf.cell(0, 8, f"Intervenant : {intervenant_nom}", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(4); pdf.set_font("Helvetica", "", 10); pdf.multi_cell(0, 6, contenu)
+
+    if genere_par_ia:
+        pdf.ln(7)
+        pdf.set_draw_color(180, 190, 200)
+        pdf.line(pdf.l_margin, pdf.get_y(), pdf.w - pdf.r_margin, pdf.get_y())
+        pdf.ln(4)
+        pdf.set_font("Helvetica", "I", 8)
+        pdf.set_text_color(90, 100, 110)
+        pdf.multi_cell(
+            0,
+            4.5,
+            "Document rédigé avec l'assistance d'une intelligence artificielle via OmniCoord IA, "
+            "à partir des informations fournies par l'utilisateur. Le contenu doit être vérifié et "
+            "validé par un professionnel avant utilisation ou diffusion.",
+        )
+        pdf.ln(2)
+        pdf.set_font("Helvetica", "", 8)
+        pdf.multi_cell(0, 4.5, "Validation humaine : Nom / fonction ____________________    Date __________    Visa __________")
+
     return bytes(pdf.output())
 
 def creer_pdf_export_rgpd(beneficiaire: dict, interventions: list, documents: list) -> bytes:
