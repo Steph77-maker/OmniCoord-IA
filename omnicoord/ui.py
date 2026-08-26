@@ -80,6 +80,32 @@ def _status_counts_as_realized(status: str) -> bool:
     return str(status or "") == "Réalisé"
 
 
+def _declare_intervention_absence(intervention_id: str) -> bool:
+    """Enregistre l'absence comme événement historique puis libère la mission.
+
+    La transaction est réalisée côté PostgreSQL par la RPC
+    ``declare_intervention_absence`` afin d'éviter qu'une affectation de
+    remplacement n'écrase l'historique de l'absence.
+    """
+    if not intervention_id:
+        return False
+    result = sb_rpc("declare_intervention_absence", {"p_intervention_id": str(intervention_id)})
+    return result is not None
+
+
+def _absence_intervenant_ids(structure_id: str, intervention_id: str) -> set[str]:
+    """Retourne les intervenants déjà déclarés absents sur une mission."""
+    if not structure_id or not intervention_id:
+        return set()
+    df_abs = sb_select("intervention_absences", {
+        "structure_id": str(structure_id),
+        "intervention_id": str(intervention_id),
+    })
+    if df_abs.empty or "intervenant_id" not in df_abs.columns:
+        return set()
+    return {str(v) for v in df_abs["intervenant_id"].dropna().tolist() if str(v).strip()}
+
+
 def _split_experience_softskills(value):
     """Sépare le parcours des observations soft skills stockées historiquement dans le même champ."""
     text = str(value or "")
@@ -1799,10 +1825,12 @@ Contrôles OmniCoord :
                                 st.rerun()
                     with qb:
                         if has_assignee and statut_cur == "Planifié" and st.button("🚨 Signaler une absence", key=f"quick_abs_{row_id}"):
-                            if sb_update("interventions", {"statut": "Absence"}, "id", row_id):
-                                audit("UPDATE_INTERVENTION_STATUS", "interventions", row_id, {"from": statut_cur, "to": "Absence"})
-                                st.warning("Absence enregistrée. L'intervention apparaît maintenant dans les urgences de remplacement.")
+                            if _declare_intervention_absence(row_id):
+                                audit("DECLARE_INTERVENTION_ABSENCE", "interventions", row_id, {"from": statut_cur, "to": "Urgence à pourvoir"})
+                                st.warning("Absence enregistrée dans l'historique. L'intervention est maintenant à pourvoir.")
                                 st.rerun()
+                            else:
+                                st.error("Impossible d'enregistrer l'absence. Vérifiez la migration Supabase Phase 5.8.")
                     with qc:
                         if statut_cur != "Annulé" and st.button("🚫 Annuler", key=f"quick_cancel_{row_id}"):
                             if sb_update("interventions", {"statut": "Annulé"}, "id", row_id):
@@ -1823,7 +1851,9 @@ Contrôles OmniCoord :
                         if cur_type not in type_options:
                             type_options.append(cur_type)
 
-                        status_options = INTERVENTION_STATUSES.copy()
+                        # L'absence est un événement historique, pas un état éditable de la mission.
+                        # Elle se déclare via l'action dédiée afin de conserver l'intervenant absent.
+                        status_options = [x for x in INTERVENTION_STATUSES if x != "Absence"]
                         if statut_cur not in status_options:
                             status_options.append(statut_cur)
 
@@ -1860,9 +1890,9 @@ Contrôles OmniCoord :
                                 new_interv_id = interv_options2[e_interv]
                                 if e_status == "Urgence à pourvoir":
                                     new_interv_id = None
-                                if e_status in ("Planifié", "Réalisé", "Absence") and not new_interv_id:
+                                if e_status in ("Planifié", "Réalisé") and not new_interv_id:
                                     raise ValidationError("Ce statut nécessite de sélectionner un intervenant.")
-                                if new_interv_id and e_status not in ("Annulé", "Absence"):
+                                if new_interv_id and e_status != "Annulé":
                                     ensure_no_intervenant_conflict(
                                         SID, new_interv_id, e_date, e_hd, e_hf, exclude_intervention_id=row_id
                                     )
@@ -1891,6 +1921,10 @@ Contrôles OmniCoord :
             st.caption("OmniCoord filtre d'abord les contraintes bloquantes, puis classe les personnes réellement affectables.")
             df_urgs = sb_select("interventions", {"structure_id": SID}, order="date_intervention")
             if not df_urgs.empty:
+                # Depuis la Phase 5.8, une absence est historisée séparément et la
+                # mission passe immédiatement en « Urgence à pourvoir ». Le statut
+                # « Absence » reste accepté uniquement pour compatibilité avec
+                # d'anciennes données.
                 df_urgs = df_urgs[df_urgs["statut"].astype(str).isin(["Urgence à pourvoir", "Absence"])].copy()
 
             if df_urgs.empty:
@@ -1920,9 +1954,13 @@ Contrôles OmniCoord :
                             st.error("Impossible de charger les données nécessaires au remplacement.")
 
                     results = st.session_state.get(key_results, [])
+                    # Ne jamais reproposer un intervenant déjà déclaré absent sur
+                    # cette même mission, même après plusieurs remplacements.
+                    absent_ids = _absence_intervenant_ids(SID, str(urg["id"]))
                     if str(urg.get("statut", "")) == "Absence" and urg.get("intervenant_id"):
-                        absent_id = str(urg.get("intervenant_id"))
-                        results = [r for r in results if str(r.get("intervenant_id", "")) != absent_id]
+                        absent_ids.add(str(urg.get("intervenant_id")))
+                    if absent_ids:
+                        results = [r for r in results if str(r.get("intervenant_id", "")) not in absent_ids]
                     eligible = [r for r in results if r.get("eligible")]
                     blocked = [r for r in results if not r.get("eligible")]
 
@@ -2109,6 +2147,7 @@ Contrôles OmniCoord :
         if not df_interv_h.empty and "deleted_at" in df_interv_h.columns:
             df_interv_h = df_interv_h[df_interv_h["deleted_at"].isna()].copy()
         df_iv_all = sb_select("interventions", {"structure_id": SID})
+        df_abs_all = sb_select("intervention_absences", {"structure_id": SID}, order="created_at")
         df_benef_h = sb_select("beneficiaires", {"structure_id": SID})
 
         if df_iv_all.empty:
@@ -2137,6 +2176,9 @@ Contrôles OmniCoord :
                 df_mois["heures_realisees_calc"] = df_mois.apply(
                     lambda r: r["duree_h"] if _status_counts_as_realized(r.get("statut")) else 0.0, axis=1
                 )
+                # Compatibilité : une éventuelle ancienne ligne encore au statut
+                # « Absence » reste comptée, mais les nouvelles absences viennent
+                # de la table d'historique intervention_absences.
                 df_mois["absence_count"] = (df_mois["statut"].astype(str) == "Absence").astype(int)
                 df_mois["annule_count"] = (df_mois["statut"].astype(str) == "Annulé").astype(int)
                 df_mois["a_pourvoir_count"] = (df_mois["statut"].astype(str) == "Urgence à pourvoir").astype(int)
@@ -2150,12 +2192,53 @@ Contrôles OmniCoord :
                     a_pourvoir=("a_pourvoir_count", "sum"),
                 ).reset_index()
 
+                # Ajoute l'historique des absences aux lignes intervenants sans
+                # doubler les métriques agence : une mission remplacée reste une
+                # seule intervention dans le total, mais l'intervenant absent garde
+                # la trace des heures qui lui avaient été planifiées.
+                df_abs_mois = pd.DataFrame()
+                if not df_abs_all.empty and "date_intervention" in df_abs_all.columns:
+                    df_abs_mois = df_abs_all.copy()
+                    df_abs_mois["date_intervention"] = pd.to_datetime(df_abs_mois["date_intervention"], errors="coerce")
+                    df_abs_mois = df_abs_mois[df_abs_mois["date_intervention"].notna()].copy()
+                    df_abs_mois["mois"] = df_abs_mois["date_intervention"].dt.to_period("M")
+                    df_abs_mois = df_abs_mois[df_abs_mois["mois"].astype(str) == mois_sel].copy()
+                    if not df_abs_mois.empty:
+                        df_abs_mois["intervenant_nom"] = df_abs_mois["intervenant_id"].apply(
+                            lambda x: interv_noms_h.get(str(x), "Intervenant supprimé")
+                        )
+                        df_abs_mois["duree_h"] = df_abs_mois.apply(
+                            lambda r: _intervention_duration_hours(r.get("heure_debut"), r.get("heure_fin")), axis=1
+                        )
+                        abs_resume = df_abs_mois.groupby("intervenant_nom", dropna=False).agg(
+                            absences_hist=("id", "count"),
+                            heures_absence_planifiees=("duree_h", "sum"),
+                        ).reset_index()
+                        for _, ar in abs_resume.iterrows():
+                            nom = ar["intervenant_nom"]
+                            mask = df_resume["intervenant_nom"] == nom
+                            if mask.any():
+                                df_resume.loc[mask, "absences"] += int(ar["absences_hist"])
+                                df_resume.loc[mask, "heures_planifiees"] += float(ar["heures_absence_planifiees"])
+                            else:
+                                df_resume = pd.concat([df_resume, pd.DataFrame([{
+                                    "intervenant_nom": nom,
+                                    "nb_interventions": 0,
+                                    "heures_planifiees": float(ar["heures_absence_planifiees"]),
+                                    "heures_realisees": 0.0,
+                                    "absences": int(ar["absences_hist"]),
+                                    "annulees": 0,
+                                    "a_pourvoir": 0,
+                                }])], ignore_index=True)
+
+                absence_total = int(df_mois["absence_count"].sum()) + (len(df_abs_mois) if not df_abs_mois.empty else 0)
+
                 st.markdown(f"### Mois de {mois_sel}")
                 col_t1, col_t2, col_t3, col_t4 = st.columns(4)
                 col_t1.metric("Total interventions", len(df_mois))
                 col_t2.metric("Heures planifiées", f"{df_mois['heures_planifiees_calc'].sum():.1f}h")
                 col_t3.metric("Heures réalisées", f"{df_mois['heures_realisees_calc'].sum():.1f}h")
-                col_t4.metric("Absences", int(df_mois["absence_count"].sum()))
+                col_t4.metric("Absences", absence_total)
 
                 display_resume = df_resume.rename(columns={
                     "intervenant_nom": "Intervenant",
@@ -2167,6 +2250,22 @@ Contrôles OmniCoord :
                     "a_pourvoir": "À pourvoir",
                 })
                 st.dataframe(display_resume, use_container_width=True, hide_index=True)
+                st.caption(
+                    "Les métriques du haut comptent chaque mission une seule fois. "
+                    "Dans le tableau intervenants, les heures initialement planifiées restent attachées à la personne absente ; "
+                    "une mission remplacée peut donc apparaître chez l'absent et chez le remplaçant."
+                )
+
+                if not df_abs_mois.empty:
+                    with st.expander(f"🚨 Historique des absences du mois ({len(df_abs_mois)})", expanded=False):
+                        for _, ab in df_abs_mois.sort_values(["date_intervention", "heure_debut"]).iterrows():
+                            nom_abs = interv_noms_h.get(str(ab.get("intervenant_id", "")), "Intervenant supprimé")
+                            benef_abs = benef_noms_h.get(str(ab.get("beneficiaire_id", "")), "Bénéficiaire inconnu")
+                            d = ab["date_intervention"].date().strftime("%d/%m/%Y") if pd.notna(ab["date_intervention"]) else "—"
+                            st.markdown(
+                                f"**{h(nom_abs)}** — {d} · {h(str(ab.get('heure_debut','')))} à {h(str(ab.get('heure_fin','')))}  \n"
+                                f"{h(benef_abs)} · {h(str(ab.get('type_intervention','')))}"
+                            )
 
                 with st.expander("✏️ Mettre à jour les interventions du mois", expanded=True):
                     st.caption("Permet de corriger le statut d'une intervention sans quitter le suivi des heures.")
@@ -2190,7 +2289,16 @@ Contrôles OmniCoord :
                             )
                             if st.button("💾 Mettre à jour", key=f"hours_save_{iid}", use_container_width=True):
                                 current_assignee = str(ivr.get("intervenant_id", "") or "").strip()
-                                if new_status in ("Planifié", "Réalisé", "Absence") and not current_assignee:
+                                if new_status == "Absence":
+                                    if not current_assignee:
+                                        st.warning("Impossible de déclarer une absence sur une intervention non affectée.")
+                                    elif _declare_intervention_absence(iid):
+                                        audit("DECLARE_INTERVENTION_ABSENCE", "interventions", iid, {"from": status_cur, "to": "Urgence à pourvoir", "source": "suivi_heures"})
+                                        st.success("Absence historisée. La mission est maintenant à pourvoir.")
+                                        st.rerun()
+                                    else:
+                                        st.error("Impossible d'enregistrer l'absence. Vérifiez la migration Supabase Phase 5.8.")
+                                elif new_status in ("Planifié", "Réalisé") and not current_assignee:
                                     st.warning("Affectez d'abord un intervenant depuis Planifications & Urgences pour utiliser ce statut.")
                                 else:
                                     payload = {"statut": new_status}
