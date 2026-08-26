@@ -13,6 +13,8 @@ from typing import Iterable
 
 import pandas as pd
 
+from .compliance import canonical_key, canonicalize_habilitation
+
 HAB_RE = re.compile(r"\[HABILITATIONS_OBLIGATOIRES:\s*(.*?)\]", re.IGNORECASE)
 WORD_RE = re.compile(r"[a-zàâäçéèêëîïôöùûüÿœ]{3,}", re.IGNORECASE)
 STOP = {"avec", "dans", "pour", "sans", "chez", "cette", "être", "avoir", "domicile", "personne", "besoin"}
@@ -44,7 +46,7 @@ def _overlaps(start_a, end_a, start_b, end_b) -> bool:
 
 def encode_required_habilitations(notes: str, required: Iterable[str]) -> str:
     clean = HAB_RE.sub("", str(notes or "")).strip()
-    values = [str(x).strip() for x in required if str(x).strip()]
+    values = [canonicalize_habilitation(x) for x in required if str(x).strip()]
     if not values:
         return clean
     return f"{clean}\n[HABILITATIONS_OBLIGATOIRES: {' | '.join(values)}]".strip()
@@ -52,7 +54,7 @@ def encode_required_habilitations(notes: str, required: Iterable[str]) -> str:
 
 def required_habilitations(intervention: dict) -> list[str]:
     match = HAB_RE.search(str(intervention.get("notes", "") or ""))
-    return [x.strip() for x in match.group(1).split("|") if x.strip()] if match else []
+    return [canonicalize_habilitation(x.strip()) for x in match.group(1).split("|") if x.strip()] if match else []
 
 
 def visible_notes(intervention: dict) -> str:
@@ -113,8 +115,9 @@ def evaluate_habilitations(df_habs: pd.DataFrame, required: list[str], *, warnin
         if df_habs.empty:
             blockers.append(f"Habilitation manquante : {wanted}")
             continue
-        normalized = df_habs["type_habilitation"].astype(str).map(_norm)
-        rows = df_habs[normalized == _norm(wanted)]
+        normalized = df_habs["type_habilitation"].astype(str).map(canonical_key)
+        wanted = canonicalize_habilitation(wanted)
+        rows = df_habs[normalized == canonical_key(wanted)]
         if rows.empty:
             blockers.append(f"Habilitation manquante : {wanted}")
             continue
