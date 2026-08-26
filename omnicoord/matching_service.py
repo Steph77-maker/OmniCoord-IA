@@ -7,6 +7,8 @@ from typing import Iterable
 
 import pandas as pd
 
+from .compliance import canonicalize_habilitation
+
 from .ai_service import appel_ia
 from .database import sb_select
 
@@ -130,7 +132,7 @@ def _valid_habilitations(df: pd.DataFrame, intervenant_id: str) -> list[dict]:
         exp = pd.to_datetime(row.get("date_expiration"), errors="coerce")
         valid = pd.isna(exp) or exp.date() >= today
         out.append({
-            "type": str(row.get("type_habilitation", "")),
+            "type": canonicalize_habilitation(row.get("type_habilitation", "")),
             "date_expiration": str(row.get("date_expiration", "")),
             "valide": bool(valid),
         })
