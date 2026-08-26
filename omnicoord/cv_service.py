@@ -11,19 +11,11 @@ import re
 from typing import Any
 
 from .exceptions import ValidationError
+from .compliance import CANONICAL_HABILITATIONS, canonicalize_many
 
 MAX_CV_CHARS = 18000
 ALLOWED_TYPES = {"application/pdf", "text/plain"}
-KNOWN_HABILITATIONS = [
-    "Diplôme AES",
-    "DEAES",
-    "PSC1 / SST",
-    "Permis B",
-    "Visite médecine du travail",
-    "Habilitation gestes et postures",
-    "AFGSU",
-]
-
+KNOWN_HABILITATIONS = [h for h in CANONICAL_HABILITATIONS if h != "Autre"]
 
 def extract_cv_text(uploaded_file) -> str:
     """Extrait du texte d'un PDF texte ou d'un .txt, avec limites de taille."""
@@ -90,5 +82,5 @@ CV :
     habs = cleaned.get("habilitations_detectees")
     if not isinstance(habs, list):
         habs = []
-    cleaned["habilitations_detectees"] = [h for h in habs if h in KNOWN_HABILITATIONS]
+    cleaned["habilitations_detectees"] = [h for h in canonicalize_many(habs) if h in KNOWN_HABILITATIONS]
     return cleaned
