@@ -582,27 +582,30 @@ Contrôles OmniCoord :
             st.info(st.session_state["dashboard_ai_summary"])
             st.caption("L'IA explique et priorise les alertes détectées par OmniCoord ; elle ne modifie aucune règle métier.")
 
-        st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
+        # Composants Streamlit natifs uniquement dans cette zone.
+        # Cela évite les erreurs de réconciliation DOM (removeChild / NotFoundError)
+        # qui peuvent apparaître lors d'un rerun après l'analyse IA avec du HTML injecté.
+        st.divider()
         st.subheader("🔔 Alertes & points d'attention")
 
         if total_alerts == 0:
-            st.markdown('<div class="oc-card oc-card-ok"><b>✅ Aucun point bloquant ou à surveiller détecté.</b></div>', unsafe_allow_html=True)
+            st.success("✅ Aucun point bloquant ou à surveiller détecté.")
         else:
             if groups["critical"]:
                 with st.expander(f"🔴 Priorité critique ({len(groups['critical'])})", expanded=True):
                     for a in groups["critical"]:
-                        st.markdown(f'<div class="alert-box alert-box-rouge">{a}</div>', unsafe_allow_html=True)
+                        st.error(_dashboard_plain(a))
             if groups["warning"]:
                 with st.expander(f"🟠 À traiter prochainement ({len(groups['warning'])})", expanded=True):
                     for a in groups["warning"]:
-                        st.markdown(f'<div class="alert-box alert-box-orange">{a}</div>', unsafe_allow_html=True)
+                        st.warning(_dashboard_plain(a))
             if groups["info"]:
                 with st.expander(f"🔵 Informations / fiches à compléter ({len(groups['info'])})"):
                     for a in groups["info"]:
-                        st.markdown(f'<div class="alert-box alert-box-bleu">{a}</div>', unsafe_allow_html=True)
+                        st.info(_dashboard_plain(a))
 
         # Interventions du jour
-        st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
+        st.divider()
         today = datetime.date.today()
         st.subheader(f"📅 Interventions du jour — {date_fr(today, 'long')}")
         df_iv = dashboard_data["interventions"]
