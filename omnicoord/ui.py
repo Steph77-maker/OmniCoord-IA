@@ -3,6 +3,7 @@
 Cette première migration conserve volontairement le comportement existant.
 """
 import datetime
+import hashlib
 import html
 import logging
 import math
@@ -73,6 +74,267 @@ def _experience_with_softskills(parcours, soft_skills):
 def _normalize_identity_text(value):
     return " ".join(str(value or "").strip().casefold().split())
 
+
+
+
+def _time_minutes(value):
+    """Convertit HH:MM[:SS] en minutes ; None si la valeur est inexploitable."""
+    if isinstance(value, datetime.time):
+        return value.hour * 60 + value.minute
+    text = str(value or "").strip()
+    for fmt in ("%H:%M:%S", "%H:%M"):
+        try:
+            parsed = datetime.datetime.strptime(text, fmt).time()
+            return parsed.hour * 60 + parsed.minute
+        except ValueError:
+            continue
+    return None
+
+
+def _dashboard_latest_habilitations(df_habs):
+    """Conserve l'état le plus récent par intervenant et habilitation canonique."""
+    if df_habs is None or df_habs.empty:
+        return pd.DataFrame() if df_habs is None else df_habs.copy()
+    work = df_habs.copy()
+    if "type_habilitation" not in work.columns or "intervenant_id" not in work.columns:
+        return work
+    work["_type_canonique"] = work["type_habilitation"].astype(str).map(canonicalize_habilitation)
+    work["_date_obt_sort"] = pd.to_datetime(work.get("date_obtention"), errors="coerce")
+    if "created_at" in work.columns:
+        work["_created_sort"] = pd.to_datetime(work["created_at"], errors="coerce")
+    else:
+        work["_created_sort"] = pd.NaT
+    if "id" not in work.columns:
+        work["id"] = work.index.astype(str)
+    work = work.sort_values(
+        ["intervenant_id", "_type_canonique", "_date_obt_sort", "_created_sort", "id"],
+        na_position="first",
+    )
+    return work.drop_duplicates(["intervenant_id", "_type_canonique"], keep="last")
+
+
+def _dashboard_missing(value):
+    """True pour None, NaN et chaînes vides sans considérer 0 comme manquant."""
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return not str(value).strip()
+
+
+def _dashboard_plain(text):
+    """Texte simple pour les prompts/empreintes, sans balises HTML."""
+    import re
+    return re.sub(r"<[^>]+>", "", html.unescape(str(text or ""))).strip()
+
+
+def _dashboard_alert_fingerprint(groups):
+    raw = "\n".join(
+        f"{level}:{_dashboard_plain(item)}"
+        for level, items in groups.items()
+        for item in items
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _dashboard_collect_checks(SID):
+    """Contrôles déterministes du centre de pilotage.
+
+    L'IA n'intervient jamais ici : elle ne fera qu'expliquer ces résultats.
+    """
+    today = datetime.date.today()
+    in_7d = today + datetime.timedelta(days=7)
+    in_60d = today + datetime.timedelta(days=60)
+
+    df_benef = sb_select("beneficiaires", {"structure_id": SID})
+    df_interv = sb_select("intervenants", {"structure_id": SID})
+    df_iv = sb_select("interventions", {"structure_id": SID})
+    df_habs = sb_select("habilitations", {"structure_id": SID})
+
+    # Ne pas faire remonter les éléments archivés comme actifs.
+    if not df_benef.empty and "deleted_at" in df_benef.columns:
+        df_benef = df_benef[df_benef["deleted_at"].isna()].copy()
+    if not df_interv.empty and "deleted_at" in df_interv.columns:
+        df_interv = df_interv[df_interv["deleted_at"].isna()].copy()
+
+    critical, warning, info = [], [], []
+    counters = {
+        "beneficiaires_actifs": 0,
+        "intervenants_dispo": 0,
+        "interventions_7j": 0,
+        "urgences": 0,
+    }
+
+    if not df_benef.empty:
+        if "statut" in df_benef.columns:
+            counters["beneficiaires_actifs"] = int((df_benef["statut"].astype(str) == "Actif").sum())
+        else:
+            counters["beneficiaires_actifs"] = len(df_benef)
+    if not df_interv.empty:
+        counters["intervenants_dispo"] = int((df_interv.get("statut_dispo", pd.Series(dtype=str)).astype(str) == "Disponible").sum())
+
+    interv_by_id = {
+        str(r.get("id")): {
+            "nom": f"{r.get('prenom', '')} {r.get('nom', '')}".strip() or "Intervenant inconnu",
+            "dispo": str(r.get("statut_dispo", "") or ""),
+            "row": r,
+        }
+        for _, r in df_interv.iterrows()
+    } if not df_interv.empty else {}
+    benef_by_id = {
+        str(r.get("id")): f"{r.get('prenom', '')} {r.get('nom', '')}".strip() or "Bénéficiaire inconnu"
+        for _, r in df_benef.iterrows()
+    } if not df_benef.empty else {}
+
+    # État courant des habilitations, pas l'historique complet.
+    latest_habs = _dashboard_latest_habilitations(df_habs)
+    if not latest_habs.empty:
+        for _, hb in latest_habs.iterrows():
+            iid = str(hb.get("intervenant_id", ""))
+            if iid and iid not in interv_by_id:
+                continue
+            exp_raw = hb.get("date_expiration")
+            exp_dt = pd.to_datetime(exp_raw, errors="coerce")
+            if pd.isna(exp_dt):
+                continue
+            exp = exp_dt.date()
+            # 9999-12-31 = valeur sentinelle "sans expiration".
+            if exp >= datetime.date(9999, 1, 1):
+                continue
+            nom = h(interv_by_id.get(iid, {}).get("nom", "Inconnu"))
+            typ = h(canonicalize_habilitation(hb.get("type_habilitation", "")))
+            if exp < today:
+                critical.append(f"🔴 Habilitation <b>{typ}</b> de <b>{nom}</b> expirée depuis le {date_fr(exp, 'court')}")
+            elif exp <= in_60d:
+                days = (exp - today).days
+                warning.append(f"🟠 Habilitation <b>{typ}</b> de <b>{nom}</b> expire dans <b>{days} j</b> ({date_fr(exp, 'court')})")
+
+    # Interventions : fenêtre opérationnelle et anomalies de données.
+    iv_upcoming = pd.DataFrame()
+    if not df_iv.empty and "date_intervention" in df_iv.columns:
+        work = df_iv.copy()
+        work["_date"] = pd.to_datetime(work["date_intervention"], errors="coerce").dt.date
+        active_mask = ~work.get("statut", pd.Series(index=work.index, dtype=str)).astype(str).isin(["Annulé"])
+        iv_upcoming = work[
+            active_mask & work["_date"].notna() & (work["_date"] >= today) & (work["_date"] <= in_7d)
+        ].copy()
+        counters["interventions_7j"] = len(iv_upcoming)
+        counters["urgences"] = int((work.get("statut", pd.Series(index=work.index, dtype=str)).astype(str) == "Urgence à pourvoir").sum())
+
+        for _, row in work.iterrows():
+            statut = str(row.get("statut", "") or "")
+            date_val = row.get("_date")
+            if pd.isna(date_val):
+                info.append(f"🔵 Intervention avec une date invalide (ID {h(str(row.get('id', '')))}).")
+                continue
+            bname = h(benef_by_id.get(str(row.get("beneficiaire_id", "")), "Bénéficiaire inconnu"))
+            start, end = row.get("heure_debut"), row.get("heure_fin")
+            sm, em = _time_minutes(start), _time_minutes(end)
+            if sm is None or em is None or em <= sm:
+                critical.append(f"🔴 Horaire incohérent pour l'intervention de <b>{bname}</b> le {date_fr(date_val, 'court')} ({h(str(start))}–{h(str(end))}).")
+
+            # Toute urgence non couverte, y compris passée, doit être visible.
+            if statut == "Urgence à pourvoir":
+                critical.append(
+                    f"🚨 Intervention <b>non couverte</b> : {date_fr(date_val, 'court')} "
+                    f"{h(str(start))}–{h(str(end))} ({h(str(row.get('type_intervention', '')) )}) — {bname}"
+                )
+
+            # Contrôles des affectations à venir : disponibilité + habilitations requises.
+            iid = str(row.get("intervenant_id", "") or "")
+            if iid and date_val >= today and statut not in ("Annulé", "Urgence à pourvoir"):
+                person = interv_by_id.get(iid)
+                if person and person.get("dispo") == "Indisponible":
+                    critical.append(
+                        f"🔴 <b>{h(person['nom'])}</b> est indiqué indisponible mais planifié le {date_fr(date_val, 'court')} "
+                        f"{h(str(start))}–{h(str(end))} chez {bname}."
+                    )
+                required = required_habilitations(row.to_dict())
+                if required:
+                    cand_habs = latest_habs[
+                        latest_habs["intervenant_id"].astype(str) == iid
+                    ] if not latest_habs.empty and "intervenant_id" in latest_habs.columns else pd.DataFrame()
+                    # Réutilise la même règle métier que le moteur de remplacement.
+                    from .replacement_service import evaluate_habilitations
+                    blockers, warn_h = evaluate_habilitations(cand_habs, required)
+                    for blocker in blockers:
+                        critical.append(
+                            f"🔴 Mission du {date_fr(date_val, 'court')} chez <b>{bname}</b> : "
+                            f"<b>{h(person['nom'] if person else 'Intervenant inconnu')}</b> — {h(blocker)}"
+                        )
+                    for w in warn_h:
+                        warning.append(
+                            f"🟠 Mission du {date_fr(date_val, 'court')} chez <b>{bname}</b> : "
+                            f"<b>{h(person['nom'] if person else 'Intervenant inconnu')}</b> — {h(w)}"
+                        )
+
+        # Conflits de planning affectés dans les 7 jours.
+        if not iv_upcoming.empty and "intervenant_id" in iv_upcoming.columns:
+            assigned = iv_upcoming[
+                iv_upcoming["intervenant_id"].notna() &
+                ~iv_upcoming.get("statut", pd.Series(index=iv_upcoming.index, dtype=str)).astype(str).isin(["Annulé", "Urgence à pourvoir"])
+            ].copy()
+            for (iid, day), grp in assigned.groupby([assigned["intervenant_id"].astype(str), "_date"]):
+                rows = list(grp.to_dict("records"))
+                for a in range(len(rows)):
+                    for b in range(a + 1, len(rows)):
+                        sa, ea = _time_minutes(rows[a].get("heure_debut")), _time_minutes(rows[a].get("heure_fin"))
+                        sb_, eb = _time_minutes(rows[b].get("heure_debut")), _time_minutes(rows[b].get("heure_fin"))
+                        if None in (sa, ea, sb_, eb):
+                            continue
+                        if sa < eb and sb_ < ea:
+                            nom = h(interv_by_id.get(str(iid), {}).get("nom", "Intervenant inconnu"))
+                            critical.append(
+                                f"🔴 Conflit de planning pour <b>{nom}</b> le {date_fr(day, 'court')} : "
+                                f"{h(str(rows[a].get('heure_debut')))}–{h(str(rows[a].get('heure_fin')))} et "
+                                f"{h(str(rows[b].get('heure_debut')))}–{h(str(rows[b].get('heure_fin')))}."
+                            )
+
+    # Fiches bénéficiaires sans référent et champs essentiels incomplets.
+    if not df_benef.empty:
+        active = df_benef[df_benef.get("statut", pd.Series(index=df_benef.index, dtype=str)).astype(str) == "Actif"] if "statut" in df_benef.columns else df_benef
+        for _, row in active.iterrows():
+            name = h(f"{row.get('prenom', '')} {row.get('nom', '')}".strip())
+            if "intervenant_attitré_id" in active.columns and _dashboard_missing(row.get("intervenant_attitré_id")):
+                warning.append(f"🟠 Bénéficiaire <b>{name}</b> sans intervenant référent défini.")
+            missing = []
+            for col, label in (("adresse", "adresse"), ("telephone", "téléphone"), ("besoins_recurrents", "besoins récurrents")):
+                if col in active.columns and _dashboard_missing(row.get(col)):
+                    missing.append(label)
+            if missing:
+                info.append(f"🔵 Fiche bénéficiaire <b>{name}</b> à compléter : {h(', '.join(missing))}.")
+
+    # Fiches intervenants incomplètes. Pas de blocage : point d'attention seulement.
+    if not df_interv.empty:
+        for _, row in df_interv.iterrows():
+            name = h(f"{row.get('prenom', '')} {row.get('nom', '')}".strip())
+            missing = []
+            for col, label in (("telephone", "téléphone"), ("email", "email"), ("zone_geo", "zone"), ("competences", "compétences"), ("disponibilites", "disponibilités")):
+                if col in df_interv.columns and _dashboard_missing(row.get(col)):
+                    missing.append(label)
+            if missing:
+                info.append(f"🔵 Fiche intervenant <b>{name}</b> à compléter : {h(', '.join(missing))}.")
+
+    # Déduplication stricte des messages pour éviter le bruit visuel.
+    def unique(items):
+        seen, out = set(), []
+        for item in items:
+            key = _dashboard_plain(item)
+            if key not in seen:
+                seen.add(key)
+                out.append(item)
+        return out
+
+    groups = {"critical": unique(critical), "warning": unique(warning), "info": unique(info)}
+    return groups, counters, {
+        "beneficiaires": df_benef,
+        "intervenants": df_interv,
+        "interventions": df_iv,
+        "interventions_7j": iv_upcoming,
+    }
 
 def _dedupe_intervenants_for_planning(df):
     """Regroupe les fiches intervenant manifestement dupliquées pour l'affichage planning.
@@ -249,110 +511,119 @@ def render():
 
 
     # ============================================================
-    #  🏠 TABLEAU DE BORD
+    #  🏠 TABLEAU DE BORD — CENTRE DE PILOTAGE
     # ============================================================
     if onglet == "🏠 Tableau de bord":
-        aujourdhui = datetime.date.today()
-        seuil_60j = aujourdhui + datetime.timedelta(days=60)
+        checked_at = datetime.datetime.now()
+        groups, counters, dashboard_data = _dashboard_collect_checks(SID)
+        st.session_state["dashboard_last_check"] = checked_at
 
         col1, col2, col3, col4 = st.columns(4)
-        nb_benef = len(sb_select("beneficiaires", {"structure_id": SID, "statut": "Actif"}))
-        nb_interv_dispo = len(sb_select("intervenants", {"structure_id": SID, "statut_dispo": "Disponible"}))
+        col1.metric("👥 Bénéficiaires actifs", counters["beneficiaires_actifs"])
+        col2.metric("🧑‍⚕️ Intervenants dispo", counters["intervenants_dispo"])
+        col3.metric("📅 Interventions (7j)", counters["interventions_7j"])
+        col4.metric("🚨 Urgences", counters["urgences"])
 
-        df_semaine = sb_select("interventions", {"structure_id": SID})
-        if not df_semaine.empty:
-            df_semaine["date_intervention"] = pd.to_datetime(df_semaine["date_intervention"]).dt.date
-            nb_plan_7j = len(df_semaine[
-                (df_semaine["date_intervention"] >= aujourdhui) &
-                (df_semaine["date_intervention"] <= aujourdhui + datetime.timedelta(days=7)) &
-                (df_semaine["statut"] != "Annulé")
-            ])
-            nb_urgences = len(df_semaine[df_semaine["statut"] == "Urgence à pourvoir"])
-        else:
-            nb_plan_7j = nb_urgences = 0
+        total_alerts = sum(len(v) for v in groups.values())
+        c_refresh, c_ai, c_time = st.columns([1.1, 1.4, 2.5])
+        with c_refresh:
+            if st.button("🔄 Actualiser les contrôles", use_container_width=True):
+                st.session_state.pop("dashboard_ai_summary", None)
+                st.session_state.pop("dashboard_ai_fingerprint", None)
+                st.rerun()
+        with c_time:
+            st.caption(f"Dernier contrôle automatique : {checked_at.strftime('%H:%M:%S')} · {total_alerts} point(s) détecté(s)")
 
-        col1.metric("👥 Bénéficiaires actifs", nb_benef)
-        col2.metric("🧑‍⚕️ Intervenants dispo", nb_interv_dispo)
-        col3.metric("📅 Interventions (7j)", nb_plan_7j)
-        col4.metric("🚨 Urgences", nb_urgences,
-                    delta=f"-{nb_urgences}" if nb_urgences > 0 else None, delta_color="inverse")
+        fingerprint = _dashboard_alert_fingerprint(groups)
+        if st.session_state.get("dashboard_ai_fingerprint") != fingerprint:
+            # Une synthèse précédente ne doit jamais rester affichée après une évolution des alertes.
+            st.session_state.pop("dashboard_ai_summary", None)
+            st.session_state["dashboard_ai_fingerprint"] = fingerprint
+
+        with c_ai:
+            analyse_click = st.button(
+                "🧠 Analyser la situation avec l'IA",
+                use_container_width=True,
+                disabled=(total_alerts == 0 or not IA_DISPONIBLE),
+            )
+
+        if analyse_click:
+            lines = []
+            labels = {"critical": "CRITIQUE", "warning": "À TRAITER", "info": "INFORMATION"}
+            for level in ("critical", "warning", "info"):
+                for item in groups[level]:
+                    lines.append(f"[{labels[level]}] {_dashboard_plain(item)}")
+            prompt = f"""
+Tu es l'assistant de pilotage d'une agence d'aide à domicile utilisant OmniCoord.
+Tu dois uniquement synthétiser et hiérarchiser les anomalies déterministes ci-dessous.
+N'invente aucun problème, aucune date, aucun nom et aucune donnée absente.
+Ne décide jamais de la conformité : les contrôles OmniCoord font foi.
+Donne une synthèse courte et actionnable en français :
+- une phrase de situation générale ;
+- 3 à 5 priorités maximum, classées par urgence ;
+- si utile, une dernière ligne 'À anticiper'.
+Pas de tableau, pas de jargon, pas de diagnostic médical.
+
+Contrôles OmniCoord :
+{chr(10).join(lines)}
+""".strip()
+            with st.spinner("Analyse des priorités en cours…"):
+                summary = appel_ia_texte(prompt)
+            if summary:
+                st.session_state["dashboard_ai_summary"] = summary
+                st.session_state["dashboard_ai_fingerprint"] = fingerprint
+
+        if st.session_state.get("dashboard_ai_summary"):
+            st.markdown("### 🧠 Synthèse intelligente")
+            st.info(st.session_state["dashboard_ai_summary"])
+            st.caption("L'IA explique et priorise les alertes détectées par OmniCoord ; elle ne modifie aucune règle métier.")
 
         st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
         st.subheader("🔔 Alertes & points d'attention")
 
-        alertes_rouges, alertes_oranges, alertes_bleues = [], [], []
-
-        # Habilitations expirées / bientôt
-        df_habs_all = sb_select("habilitations", {"structure_id": SID})
-        if not df_habs_all.empty:
-            df_interv_noms = sb_select("intervenants", {"structure_id": SID})
-            interv_noms = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_interv_noms.iterrows()}
-
-            df_habs_all["date_exp_dt"] = pd.to_datetime(df_habs_all["date_expiration"], errors="coerce").dt.date
-            for _, hb in df_habs_all.iterrows():
-                nom_i = h(interv_noms.get(str(hb.get("intervenant_id", "")), "Inconnu"))
-                type_h = h(hb["type_habilitation"])
-                exp = hb["date_expiration"]
-                if pd.isna(hb["date_exp_dt"]): continue
-                if hb["date_exp_dt"] < aujourdhui:
-                    alertes_rouges.append(f"🔴 Habilitation <b>{type_h}</b> de <b>{nom_i}</b> expirée depuis le {exp}")
-                elif hb["date_exp_dt"] <= seuil_60j:
-                    jours = (hb["date_exp_dt"] - aujourdhui).days
-                    alertes_oranges.append(f"🟠 Habilitation <b>{type_h}</b> de <b>{nom_i}</b> expire dans <b>{jours}j</b> ({exp})")
-
-        # Urgences non couvertes
-        df_urg = sb_select("interventions", {"structure_id": SID, "statut": "Urgence à pourvoir"})
-        if not df_urg.empty:
-            df_benef_noms = sb_select("beneficiaires", {"structure_id": SID})
-            benef_noms = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_benef_noms.iterrows()}
-            for _, u in df_urg.iterrows():
-                b_nom = h(benef_noms.get(str(u.get("beneficiaire_id", "")), "Inconnu"))
-                alertes_rouges.append(
-                    f"🚨 Intervention <b>non couverte</b> : {h(str(u['date_intervention']))} "
-                    f"{h(str(u['heure_debut']))}–{h(str(u['heure_fin']))} ({h(str(u['type_intervention']))}) — {b_nom}"
-                )
-
-        total = len(alertes_rouges) + len(alertes_oranges) + len(alertes_bleues)
-        if total == 0:
-            st.markdown('<div class="oc-card oc-card-ok"><b>✅ Tout est en ordre !</b></div>', unsafe_allow_html=True)
+        if total_alerts == 0:
+            st.markdown('<div class="oc-card oc-card-ok"><b>✅ Aucun point bloquant ou à surveiller détecté.</b></div>', unsafe_allow_html=True)
         else:
-            if alertes_rouges:
-                with st.expander(f"🔴 Alertes critiques ({len(alertes_rouges)})", expanded=True):
-                    for a in alertes_rouges:
+            if groups["critical"]:
+                with st.expander(f"🔴 Priorité critique ({len(groups['critical'])})", expanded=True):
+                    for a in groups["critical"]:
                         st.markdown(f'<div class="alert-box alert-box-rouge">{a}</div>', unsafe_allow_html=True)
-            if alertes_oranges:
-                with st.expander(f"🟠 À renouveler prochainement ({len(alertes_oranges)})", expanded=True):
-                    for a in alertes_oranges:
+            if groups["warning"]:
+                with st.expander(f"🟠 À traiter prochainement ({len(groups['warning'])})", expanded=True):
+                    for a in groups["warning"]:
                         st.markdown(f'<div class="alert-box alert-box-orange">{a}</div>', unsafe_allow_html=True)
-            if alertes_bleues:
-                with st.expander(f"ℹ️ Points d'attention ({len(alertes_bleues)})"):
-                    for a in alertes_bleues:
+            if groups["info"]:
+                with st.expander(f"🔵 Informations / fiches à compléter ({len(groups['info'])})"):
+                    for a in groups["info"]:
                         st.markdown(f'<div class="alert-box alert-box-bleu">{a}</div>', unsafe_allow_html=True)
 
         # Interventions du jour
         st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
-        st.subheader(f"📅 Interventions du jour — {date_fr(aujourdhui, 'long')}")
-        df_jour = sb_select("interventions", {"structure_id": SID, "date_intervention": aujourdhui.isoformat()})
-        if df_jour.empty:
+        today = datetime.date.today()
+        st.subheader(f"📅 Interventions du jour — {date_fr(today, 'long')}")
+        df_iv = dashboard_data["interventions"]
+        if df_iv.empty or "date_intervention" not in df_iv.columns:
             st.caption("Aucune intervention planifiée aujourd'hui.")
         else:
-            df_benef_noms = sb_select("beneficiaires", {"structure_id": SID})
-            df_interv_noms = sb_select("intervenants", {"structure_id": SID})
-            benef_noms = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_benef_noms.iterrows()}
-            interv_noms = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_interv_noms.iterrows()}
-
-            for _, row in df_jour.iterrows():
-                coul = {"Planifié":"#4c8dfa","Urgence à pourvoir":"#e0554f","Réalisé":"#3fae74","Annulé":"#8996a3"}.get(row["statut"], "#8996a3")
-                b_nom = h(benef_noms.get(str(row.get("beneficiaire_id", "")), "—"))
-                i_nom = h(interv_noms.get(str(row.get("intervenant_id", "")), "Non assigné"))
-                st.markdown(f"""
-                    <div class="oc-card" style="border-left-color:{coul}; padding:12px 16px;">
-                        <b>{h(str(row['heure_debut']))} – {h(str(row['heure_fin']))}</b> · {h(str(row['type_intervention']))}
-                        <span class="oc-badge" style="background:{coul}; float:right;">{h(str(row['statut']))}</span><br>
-                        <span style="color:#b8c2cc;">👤 {b_nom} &nbsp;•&nbsp; 🧑‍⚕️ {i_nom}</span>
-                    </div>
-                """, unsafe_allow_html=True)
-
+            df_jour = df_iv[pd.to_datetime(df_iv["date_intervention"], errors="coerce").dt.date == today].copy()
+            if df_jour.empty:
+                st.caption("Aucune intervention planifiée aujourd'hui.")
+            else:
+                df_benef_noms = dashboard_data["beneficiaires"]
+                df_interv_noms = dashboard_data["intervenants"]
+                benef_noms = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_benef_noms.iterrows()} if not df_benef_noms.empty else {}
+                interv_noms = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_interv_noms.iterrows()} if not df_interv_noms.empty else {}
+                for _, row in df_jour.sort_values("heure_debut").iterrows():
+                    coul = {"Planifié":"#4c8dfa", "Urgence à pourvoir":"#e0554f", "Réalisé":"#3fae74", "Annulé":"#8996a3"}.get(row.get("statut"), "#8996a3")
+                    b_nom = h(benef_noms.get(str(row.get("beneficiaire_id", "")), "—"))
+                    i_nom = h(interv_noms.get(str(row.get("intervenant_id", "")), "Non assigné"))
+                    st.markdown(f"""
+                        <div class="oc-card" style="border-left-color:{coul}; padding:12px 16px;">
+                            <b>{h(str(row.get('heure_debut', '')))} – {h(str(row.get('heure_fin', '')))}</b> · {h(str(row.get('type_intervention', '')))}
+                            <span class="oc-badge" style="background:{coul}; float:right;">{h(str(row.get('statut', '')))}</span><br>
+                            <span style="color:#b8c2cc;">👤 {b_nom} &nbsp;•&nbsp; 🧑‍⚕️ {i_nom}</span>
+                        </div>
+                    """, unsafe_allow_html=True)
 
     # ============================================================
     #  🧑‍🤝‍🧑 VIVIER & SOURCING
