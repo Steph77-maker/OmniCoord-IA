@@ -1,5 +1,6 @@
 """Génération des PDF OmniCoord."""
 import datetime
+import re
 from fpdf import FPDF
 
 
@@ -29,6 +30,15 @@ def _resolve_pdf_placeholders(value: str, date_doc: str) -> str:
     for placeholder in ("[Date du jour]", "[DATE DU JOUR]", "[date du jour]", "{{date_du_jour}}", "{{DATE_DU_JOUR}}"):
         text = text.replace(placeholder, date_doc)
     return text
+
+
+def _strip_markdown_for_pdf(value) -> str:
+    """Nettoie le Markdown simple avant affichage dans l'export RGPD."""
+    text = "" if value is None else str(value)
+    text = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", text)
+    text = text.replace("**", "").replace("__", "")
+    text = re.sub(r"(?m)^\s*[-*+]\s+", "- ", text)
+    return text.strip()
 
 
 class PDFDocument(FPDF):
@@ -119,7 +129,7 @@ def creer_pdf_export_rgpd(beneficiaire: dict, interventions: list, documents: li
     for doc in documents:
         pdf.multi_cell(
             0, 5,
-            f"[{doc.get('date_creation', '')}] {doc.get('type_document', '')} : {doc.get('contenu', '')[:200]}...",
+            f"[{doc.get('date_creation', '')}] {doc.get('type_document', '')} : {_strip_markdown_for_pdf(doc.get('contenu', ''))[:200]}...",
             new_x="LMARGIN",
             new_y="NEXT",
         )
