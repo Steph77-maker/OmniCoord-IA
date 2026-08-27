@@ -232,6 +232,56 @@ def _split_experience(value: str) -> tuple[str, str]:
     return left.strip(), right.replace(":", "", 1).strip()
 
 
+
+def analyse_candidate_quick(
+    beneficiary: dict,
+    candidate: dict,
+) -> dict | None:
+    """Analyse IA très courte d'un seul candidat.
+
+    Le score et le classement ne sont jamais modifiés. Cette fonction fournit
+    uniquement une aide qualitative à la décision, à la demande de l'utilisateur.
+    """
+    prompt = f"""
+Tu aides un coordinateur de services à domicile à départager rapidement un candidat.
+Le score et le classement ont déjà été calculés par OmniCoord : ne les modifie pas.
+N'invente aucune donnée et ne fais aucun diagnostic médical ou psychologique.
+
+BÉNÉFICIAIRE
+Besoins : {beneficiary.get('besoins_recurrents', 'Non renseignés')}
+Gestes techniques : {beneficiary.get('gestes_techniques', 'Non renseignés')}
+Horaires : {beneficiary.get('besoins_horaires', 'Non renseignés')}
+Dépendance : {beneficiary.get('niveau_dependance', 'Non renseignée')}
+
+CANDIDAT
+Nom : {candidate.get('intervenant_nom', '')}
+Compétences : {candidate.get('competences', '')}
+Parcours : {candidate.get('experience', '')}
+Savoir-être observé : {candidate.get('soft', '')}
+Zone : {candidate.get('intervenant_zone', '')}
+Disponibilités : {candidate.get('intervenant_dispo', '')}
+Score métier OmniCoord : {candidate.get('score_global', '')}%
+
+Réponds UNIQUEMENT en JSON strict :
+{{
+  "synthese": "<1 phrase courte, factuelle, utile à la décision>",
+  "vigilance": "<1 point de vigilance court ou chaîne vide>"
+}}
+""".strip()
+
+    data = appel_ia(prompt)
+    if not isinstance(data, dict):
+        return None
+
+    synthese = str(data.get("synthese", "") or "").strip()
+    vigilance = str(data.get("vigilance", "") or "").strip()
+    if not synthese and not vigilance:
+        return None
+    return {
+        "synthese": synthese,
+        "vigilance": vigilance,
+    }
+
 def match_beneficiary(
     structure_id: str,
     beneficiary: dict,
@@ -277,6 +327,9 @@ def match_beneficiary(
             "intervenant_statut": interv.get("type_statut", ""),
             "intervenant_zone": interv.get("zone_geo", ""),
             "intervenant_dispo": interv.get("disponibilites", ""),
+            "competences": str(interv.get("competences", "") or ""),
+            "experience": item["experience"],
+            "soft": item["soft"],
             "score_competences": item["score_competences"],
             "score_habilitations": item["score_habilitations"],
             "score_compatibilite": item["score_compatibilite"],
