@@ -618,7 +618,7 @@ def render():
         "📅 Plannings & Urgences",
         "✅ Conformité & Habilitations",
         "📊 Suivi des heures",
-        "👤 Mon Profil",
+        "⚙️ Paramètres du compte",
     ]
     if IS_ADMIN:
         _onglets.insert(0, "🛠️ Administration")
@@ -2779,7 +2779,7 @@ Contrôles OmniCoord :
     # ============================================================
     #  👤 MON PROFIL — Version admin / version client
     # ============================================================
-    elif onglet == "👤 Mon Profil":
+    elif onglet == "⚙️ Paramètres du compte":
 
         if IS_ADMIN:
             # -------------------------------------------------------
@@ -2789,7 +2789,7 @@ Contrôles OmniCoord :
             # -------------------------------------------------------
             st.caption("👑 Compte administrateur OmniCoord IA — Éditeur SaaS")
 
-            st.subheader("🔑 Changer mon mot de passe admin")
+            st.subheader("🔐 Sécurité du compte")
             with st.form("form_mdp_admin"):
                 n1 = st.text_input("Nouveau mot de passe", type="password")
                 n2 = st.text_input("Confirmer", type="password")
@@ -2808,7 +2808,7 @@ Contrôles OmniCoord :
                             st.error("Impossible d'effectuer cette opération pour le moment.")
 
             st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
-            st.subheader("📧 Ma boîte mail (envoi des accès clients)")
+            st.subheader("📧 Messagerie — envoi des accès clients")
             st.info("💡 Cette boîte sert à envoyer automatiquement les identifiants à vos nouveaux clients. Utilisez un **mot de passe d'application Gmail** (pas votre mot de passe personnel). Générez-en un sur myaccount.google.com > Sécurité > Mots de passe des applications.")
 
             with st.form("form_mail_admin"):
@@ -2835,7 +2835,7 @@ Contrôles OmniCoord :
 
             # Test de connexion mail
             st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
-            st.subheader("🧪 Tester l'envoi de mail")
+            st.subheader("🧪 Tester la messagerie")
             email_test = st.text_input("Envoyer un email de test à :")
             if st.button("Envoyer le test") and email_test:
                 ok, msg = envoyer_email(
@@ -2854,7 +2854,7 @@ Contrôles OmniCoord :
             # -------------------------------------------------------
             st.caption(f"Structure : **{st.session_state.get('structure_nom', '—')}**")
 
-            st.subheader("🔑 Changer mon mot de passe")
+            st.subheader("🔐 Sécurité du compte")
             with st.form("form_mdp"):
                 n1 = st.text_input("Nouveau mot de passe", type="password")
                 n2 = st.text_input("Confirmer", type="password")
@@ -2873,7 +2873,7 @@ Contrôles OmniCoord :
                             st.error("Impossible d'effectuer cette opération pour le moment.")
 
             st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
-            st.subheader("📧 Ma boîte mail (sollicitations intervenants)")
+            st.subheader("📧 Messagerie — sollicitations intervenants")
             st.info("💡 Gmail : utilisez un **mot de passe d'application** (pas votre mot de passe principal). Générez-en un sur myaccount.google.com > Sécurité > Mots de passe des applications.")
 
             with st.form("form_mail"):
@@ -3146,7 +3146,7 @@ Contrôles OmniCoord :
                                         f"📧 Identifiant : {email_client}\n"
                                         f"🔑 Mot de passe : {mdp_client}\n\n"
                                         f"📅 Votre accès est valable jusqu'au {date_fr(date_fin, 'court')}.\n\n"
-                                        f"⚠️ Nous vous recommandons de changer votre mot de passe dès votre première connexion (Mon Profil > Changer mon mot de passe).\n\n"
+                                        f"⚠️ Nous vous recommandons de changer votre mot de passe dès votre première connexion (Paramètres du compte > Sécurité du compte).\n\n"
                                         f"Pour toute question, contactez-nous.\n\n"
                                         f"Cordialement,\n"
                                         f"L'équipe OmniCoord IA"
