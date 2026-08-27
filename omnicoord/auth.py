@@ -106,7 +106,6 @@ def _process_pending_login() -> bool:
 
         profil, structure_nom = _load_authenticated_profile(str(user.id))
         if not profil:
-            enregistrer_tentative(email_saisi, False)
             client.auth.sign_out()
             st.error("Profil introuvable. Contactez l'administrateur.")
             return False
@@ -115,7 +114,6 @@ def _process_pending_login() -> bool:
         if date_fin_raw and not profil.get("est_admin", False):
             date_fin = datetime.date.fromisoformat(str(date_fin_raw))
             if datetime.date.today() > date_fin:
-                enregistrer_tentative(email_saisi, False)
                 client.auth.sign_out()
                 st.error("Votre période d'accès a expiré. Contactez l'administrateur.")
                 return False
@@ -142,9 +140,9 @@ def _process_pending_login() -> bool:
         st.rerun()
 
     except Exception as exc:
-        enregistrer_tentative(email_saisi, False)
         err_msg = str(exc)
         if "Invalid login" in err_msg or "credentials" in err_msg.lower():
+            enregistrer_tentative(email_saisi, False)
             st.error("Email ou mot de passe incorrect.")
         else:
             logger.exception("Login error")
