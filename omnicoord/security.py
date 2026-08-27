@@ -53,14 +53,32 @@ MAX_ECHECS = 10
 FENETRE_MINUTES = 15
 
 def est_bloque(email: str) -> bool:
+    """Bloque seulement après MAX_ECHECS échecs consécutifs depuis le dernier succès."""
     try:
         depuis = (datetime.datetime.utcnow() - datetime.timedelta(minutes=FENETRE_MINUTES)).isoformat()
-        res = get_supabase_admin().table("login_attempts").select("id", count="exact").eq("email", email).eq("succes", False).gte("created_at", depuis).execute()
-        return (res.count or 0) >= MAX_ECHECS
+        res = (
+            get_supabase_admin()
+            .table("login_attempts")
+            .select("succes,created_at")
+            .eq("email", email)
+            .gte("created_at", depuis)
+            .order("created_at", desc=True)
+            .limit(MAX_ECHECS)
+            .execute()
+        )
+
+        echecs_consecutifs = 0
+        for tentative in (res.data or []):
+            if tentative.get("succes") is True:
+                break
+            echecs_consecutifs += 1
+
+        return echecs_consecutifs >= MAX_ECHECS
     except Exception:
         logger.exception("est_bloque() failed")
-        # Fail closed : une erreur de contrôle ne doit pas autoriser la connexion.
-        return True
+        # Une panne du contrôle anti-brute-force ne doit pas créer un faux blocage.
+        # Supabase Auth continue de vérifier les identifiants.
+        return False
 
 def enregistrer_tentative(email: str, succes: bool):
     try:
