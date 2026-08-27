@@ -1520,68 +1520,186 @@ Contrôles OmniCoord :
                                             st.rerun()
 
                             st.markdown("---")
-                            confirm_b = st.checkbox("Confirmer l'archivage", key=f"confirm_del_b_{row['id']}", help="La fiche est retirée des listes actives mais l'historique est conservé.")
-                            if st.button("🗑️ Archiver / retirer", key=f"del_b_{row['id']}", disabled=not confirm_b):
-                                if sb_update("beneficiaires", {"deleted_at": datetime.datetime.utcnow().isoformat(), "statut": "Inactif"}, "id", row["id"]):
+                            st.markdown("#### Archivage")
+                            confirm_b = st.checkbox(
+                                "Confirmer l'archivage",
+                                key=f"confirm_del_b_{row['id']}",
+                                help="La fiche est retirée des listes actives mais l'historique est conservé.",
+                            )
+                            if st.button("🗃️ Archiver / retirer", key=f"del_b_{row['id']}", disabled=not confirm_b):
+                                if sb_update(
+                                    "beneficiaires",
+                                    {"deleted_at": datetime.datetime.utcnow().isoformat(), "statut": "Inactif"},
+                                    "id",
+                                    row["id"],
+                                ):
                                     audit("ARCHIVE_BENEFICIAIRE", "beneficiaires", str(row["id"]))
                                     st.success("Bénéficiaire archivé et retiré des listes actives.")
                                     st.rerun()
 
+                            st.markdown("#### ⚠️ Suppression définitive")
+                            st.caption(
+                                "À réserver aux fiches créées par erreur ou aux données de test. "
+                                "Pour un bénéficiaire ayant un historique, utilisez l'archivage afin de préserver les interventions et documents."
+                            )
+                            confirm_delete_b = st.checkbox(
+                                "Je souhaite supprimer définitivement cette fiche",
+                                key=f"confirm_hard_delete_b_{row['id']}",
+                            )
+
+                            if confirm_delete_b:
+                                # Vérification avant toute suppression : on ne supprime pas une
+                                # fiche qui possède déjà un historique métier.
+                                linked_interventions = sb_select(
+                                    "interventions",
+                                    {"structure_id": SID, "beneficiaire_id": str(row["id"])},
+                                )
+                                linked_documents = sb_select(
+                                    "documents_transmissions",
+                                    {"structure_id": SID, "beneficiaire_id": str(row["id"])},
+                                )
+                                nb_interventions = 0 if linked_interventions.empty else len(linked_interventions)
+                                nb_documents = 0 if linked_documents.empty else len(linked_documents)
+                                has_history = nb_interventions > 0 or nb_documents > 0
+
+                                if has_history:
+                                    st.warning(
+                                        f"Suppression définitive bloquée : cette fiche possède "
+                                        f"{nb_interventions} intervention(s) et {nb_documents} document(s). "
+                                        "Archivez-la pour conserver l'historique."
+                                    )
+                                else:
+                                    delete_phrase = st.text_input(
+                                        'Pour confirmer, tapez exactement SUPPRIMER',
+                                        key=f"hard_delete_phrase_b_{row['id']}",
+                                    )
+                                    hard_delete_ok = delete_phrase.strip() == "SUPPRIMER"
+                                    if st.button(
+                                        "🗑️ Supprimer définitivement",
+                                        key=f"hard_delete_b_{row['id']}",
+                                        disabled=not hard_delete_ok,
+                                        type="primary",
+                                    ):
+                                        if sb_delete("beneficiaires", "id", str(row["id"])):
+                                            audit(
+                                                "DELETE_BENEFICIAIRE",
+                                                "beneficiaires",
+                                                str(row["id"]),
+                                                {"motif": "suppression_definitive_sans_historique"},
+                                            )
+                                            st.success("Bénéficiaire supprimé définitivement.")
+                                            st.rerun()
+                                        else:
+                                            st.error(
+                                                "La suppression définitive a été refusée par la base. "
+                                                "Aucune donnée liée n'a été supprimée."
+                                            )
+
         with tab_ajout_b:
-            with st.form("form_add_benef", clear_on_submit=True):
+            # Important : ce bloc n'utilise volontairement PAS st.form().
+            # Dans un formulaire Streamlit, la touche Entrée d'un time_input peut
+            # déclencher la soumission avant que l'utilisateur ait fini la fiche.
+            # Ici, seule l'action explicite sur le bouton "Ajouter" crée le bénéficiaire.
+            add_b_keys = [
+                "new_b_nom", "new_b_prenom", "new_b_adresse", "new_b_telephone",
+                "new_b_gir", "new_b_contact_nom", "new_b_contact_tel",
+                "new_b_besoins", "new_b_gestes", "new_bh_debut", "new_bh_fin",
+                "new_b_notes", "new_b_attitre",
+            ]
+            if st.session_state.pop("reset_add_beneficiaire", False):
+                for key in add_b_keys:
+                    st.session_state.pop(key, None)
+
+            with st.container(border=True):
                 c1, c2 = st.columns(2)
                 with c1:
-                    nom_b = st.text_input("Nom *")
-                    prenom_b = st.text_input("Prénom *")
-                    adresse_b = st.text_input("Adresse")
-                    telephone_b = st.text_input("Téléphone")
-                    niveau_dep = st.selectbox("GIR", ["GIR 1","GIR 2","GIR 3","GIR 4","GIR 5","GIR 6","Non évalué"])
+                    nom_b = st.text_input("Nom *", key="new_b_nom")
+                    prenom_b = st.text_input("Prénom *", key="new_b_prenom")
+                    adresse_b = st.text_input("Adresse", key="new_b_adresse")
+                    telephone_b = st.text_input("Téléphone", key="new_b_telephone")
+                    niveau_dep = st.selectbox(
+                        "GIR",
+                        ["GIR 1","GIR 2","GIR 3","GIR 4","GIR 5","GIR 6","Non évalué"],
+                        key="new_b_gir",
+                    )
                 with c2:
-                    contact_urgence_nom_b = st.text_input("Contact d'urgence (nom + lien)")
-                    contact_urgence_tel_b = st.text_input("Tél. contact d'urgence")
-                    besoins_rec = st.text_area("Besoins récurrents")
-                    gestes_b = st.text_area("Gestes techniques requis")
+                    contact_urgence_nom_b = st.text_input(
+                        "Contact d'urgence (nom + lien)",
+                        key="new_b_contact_nom",
+                    )
+                    contact_urgence_tel_b = st.text_input(
+                        "Tél. contact d'urgence",
+                        key="new_b_contact_tel",
+                    )
+                    besoins_rec = st.text_area("Besoins récurrents", key="new_b_besoins")
+                    gestes_b = st.text_area("Gestes techniques requis", key="new_b_gestes")
                     bh_new_c1, bh_new_c2 = st.columns(2)
                     with bh_new_c1:
-                        horaires_debut_b = st.time_input("Début du besoin", value=datetime.time(8, 0), key="new_bh_debut")
+                        horaires_debut_b = st.time_input(
+                            "Début du besoin",
+                            value=datetime.time(8, 0),
+                            key="new_bh_debut",
+                        )
                     with bh_new_c2:
-                        horaires_fin_b = st.time_input("Fin du besoin", value=datetime.time(12, 0), key="new_bh_fin")
-                    notes_b = st.text_area("Notes")
+                        horaires_fin_b = st.time_input(
+                            "Fin du besoin",
+                            value=datetime.time(12, 0),
+                            key="new_bh_fin",
+                        )
+                    notes_b = st.text_area("Notes", key="new_b_notes")
 
                 opts_att = {"Non défini": None}
                 if not df_interv_all.empty:
                     opts_att.update({f"{r['prenom']} {r['nom']}": str(r["id"]) for _, r in df_interv_all.iterrows()})
-                att_sel = st.selectbox("Intervenant attitré (optionnel)", list(opts_att.keys()))
+                att_sel = st.selectbox(
+                    "Intervenant attitré (optionnel)",
+                    list(opts_att.keys()),
+                    key="new_b_attitre",
+                )
 
-                if st.form_submit_button("Ajouter") and nom_b and prenom_b:
-                    duplicate_b = False
-                    if not df_b.empty:
-                        duplicate_b = bool((
-                            df_b["nom"].fillna("").astype(str).str.strip().str.casefold().eq(nom_b.strip().casefold())
-                            & df_b["prenom"].fillna("").astype(str).str.strip().str.casefold().eq(prenom_b.strip().casefold())
-                        ).any())
-                    if duplicate_b:
-                        st.error("Un bénéficiaire portant ce nom et ce prénom existe déjà dans la liste active.")
+                add_b_clicked = st.button("Ajouter", key="btn_add_beneficiaire", type="primary")
+
+                if add_b_clicked:
+                    if not nom_b.strip() or not prenom_b.strip():
+                        st.error("Le nom et le prénom sont obligatoires.")
                     else:
-                        try:
-                            besoins_horaires_b = _besoin_horaire_label(horaires_debut_b, horaires_fin_b)
-                        except ValueError as exc:
-                            st.error(str(exc))
-                            new_b = None
+                        duplicate_b = False
+                        if not df_b.empty:
+                            duplicate_b = bool((
+                                df_b["nom"].fillna("").astype(str).str.strip().str.casefold().eq(nom_b.strip().casefold())
+                                & df_b["prenom"].fillna("").astype(str).str.strip().str.casefold().eq(prenom_b.strip().casefold())
+                            ).any())
+
+                        if duplicate_b:
+                            st.error("Un bénéficiaire portant ce nom et ce prénom existe déjà dans la liste active.")
                         else:
-                            new_b = sb_insert("beneficiaires", {
-                            "structure_id": SID, "nom": nom_b.strip(), "prenom": prenom_b.strip(),
-                            "adresse": adresse_b, "telephone": telephone_b, "niveau_dependance": niveau_dep,
-                            "gestes_techniques": gestes_b, "besoins_horaires": besoins_horaires_b,
-                            "besoins_recurrents": besoins_rec, "notes": notes_b,
-                            "contact_urgence_nom": contact_urgence_nom_b, "contact_urgence_tel": contact_urgence_tel_b,
-                            "intervenant_attitré_id": opts_att[att_sel],
-                            "statut": "Actif", "date_creation": datetime.date.today().isoformat()
-                            })
-                        if new_b:
-                            audit("CREATE_BENEFICIAIRE", "beneficiaires", new_b.get("id"))
-                            st.success(f"{prenom_b} {nom_b} ajouté(e).")
-                            st.rerun()
+                            try:
+                                besoins_horaires_b = _besoin_horaire_label(horaires_debut_b, horaires_fin_b)
+                            except ValueError as exc:
+                                st.error(str(exc))
+                            else:
+                                new_b = sb_insert("beneficiaires", {
+                                    "structure_id": SID,
+                                    "nom": nom_b.strip(),
+                                    "prenom": prenom_b.strip(),
+                                    "adresse": adresse_b,
+                                    "telephone": telephone_b,
+                                    "niveau_dependance": niveau_dep,
+                                    "gestes_techniques": gestes_b,
+                                    "besoins_horaires": besoins_horaires_b,
+                                    "besoins_recurrents": besoins_rec,
+                                    "notes": notes_b,
+                                    "contact_urgence_nom": contact_urgence_nom_b,
+                                    "contact_urgence_tel": contact_urgence_tel_b,
+                                    "intervenant_attitré_id": opts_att[att_sel],
+                                    "statut": "Actif",
+                                    "date_creation": datetime.date.today().isoformat(),
+                                })
+                                if new_b:
+                                    audit("CREATE_BENEFICIAIRE", "beneficiaires", new_b.get("id"))
+                                    st.session_state["reset_add_beneficiaire"] = True
+                                    st.success(f"{prenom_b} {nom_b} ajouté(e).")
+                                    st.rerun()
 
 
     # ============================================================
