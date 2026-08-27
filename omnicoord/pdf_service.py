@@ -104,7 +104,12 @@ def creer_pdf_export_rgpd(beneficiaire: dict, interventions: list, documents: li
     pdf.ln(4); pdf.set_font("Helvetica", "B", 11); pdf.cell(0, 7, "Informations personnelles", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 10)
     for label, key in [("Adresse", "adresse"), ("Téléphone", "telephone"), ("Dépendance", "niveau_dependance"), ("Notes", "notes")]:
-        pdf.multi_cell(0, 6, f"{label} : {beneficiaire.get(key, '—')}")
+        pdf.multi_cell(
+            0, 6,
+            f"{label} : {beneficiaire.get(key, '—')}",
+            new_x="LMARGIN",
+            new_y="NEXT",
+        )
     pdf.ln(4); pdf.set_font("Helvetica", "B", 11); pdf.cell(0, 7, f"Interventions ({len(interventions)})", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 9)
     for iv in interventions:
@@ -112,7 +117,12 @@ def creer_pdf_export_rgpd(beneficiaire: dict, interventions: list, documents: li
     pdf.ln(4); pdf.set_font("Helvetica", "B", 11); pdf.cell(0, 7, f"Documents ({len(documents)})", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 9)
     for doc in documents:
-        pdf.multi_cell(0, 5, f"[{doc.get('date_creation', '')}] {doc.get('type_document', '')} : {doc.get('contenu', '')[:200]}...")
+        pdf.multi_cell(
+            0, 5,
+            f"[{doc.get('date_creation', '')}] {doc.get('type_document', '')} : {doc.get('contenu', '')[:200]}...",
+            new_x="LMARGIN",
+            new_y="NEXT",
+        )
     return bytes(pdf.output())
 
 def generer_pdf_matching(intervenant_nom, intervenant_statut, intervenant_zone, beneficiaire_nom, score_global, profil_humain, traits_dominants, dimensions, scores, competences_transferables, alerte_habilitation, alerte_humaine, justification) -> bytes:
