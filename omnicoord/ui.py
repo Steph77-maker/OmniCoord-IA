@@ -1208,27 +1208,25 @@ Contrôles OmniCoord :
                 </div>
             """, unsafe_allow_html=True)
 
-            if st.button("🎯 Lancer le matching IA"):
+            if st.button("🎯 Lancer le matching"):
                 try:
-                    # Un nouveau matching ne doit jamais réutiliser des états IA
-                    # ou des résultats issus de l'exécution précédente.
+                    # Le premier résultat doit être immédiat : préfiltrage + score métier
+                    # uniquement. L'analyse Gemini est déclenchée séparément et reste
+                    # facultative.
                     st.session_state.pop("resultats_matching", None)
                     st.session_state.pop("benef_matching_label", None)
                     st.session_state.pop("_ai_error_shown", None)
-                    with st.spinner("Préfiltrage, scoring puis analyse IA des meilleurs candidats..."):
+                    st.session_state.pop("matching_ai_enriched", None)
+                    with st.spinner("Préfiltrage et classement métier des candidats..."):
                         resultats = match_beneficiary(
                             SID,
                             benef_row.to_dict(),
                             df_interv_dispo,
-                            ai_top_k=5,
+                            ai_top_k=0,
                         )
                     st.session_state["resultats_matching"] = resultats
                     st.session_state["benef_matching_label"] = benef_choisi_label
-                    if len(df_interv_dispo) > 5:
-                        st.caption(
-                            f"⚡ {len(df_interv_dispo)} candidats préclassés en Python ; "
-                            "l'IA peut analyser jusqu'aux 5 meilleurs pour limiter coût et latence."
-                        )
+                    st.session_state["matching_ai_enriched"] = False
                 except DatabaseError:
                     st.error("Impossible de charger les données nécessaires au matching.")
 
@@ -1240,9 +1238,31 @@ Contrôles OmniCoord :
 
                 ai_count = sum(1 for r in matching_results if r.get("ai_used"))
                 if ai_count:
-                    st.success(f"✨ Analyse IA effectuée sur {ai_count} profil(s). Le score final reste calculé par OmniCoord.")
+                    st.success(
+                        f"✨ Analyse IA effectuée sur {ai_count} profil(s). "
+                        "Le classement et le score final restent calculés par OmniCoord."
+                    )
                 else:
-                    st.info("🧮 Classement métier uniquement : aucune note IA n'est affichée ni simulée.")
+                    st.info(
+                        "⚡ Classement métier disponible immédiatement. "
+                        "Vous pouvez déjà affecter un intervenant, ou demander l'analyse IA du Top 3."
+                    )
+                    if st.button("✨ Analyser le Top 3 avec l'IA", key=f"matching_ai_top3_{benef_id}"):
+                        try:
+                            st.session_state.pop("_ai_error_shown", None)
+                            with st.spinner("Analyse IA qualitative du Top 3..."):
+                                enriched_results = match_beneficiary(
+                                    SID,
+                                    benef_row.to_dict(),
+                                    df_interv_dispo,
+                                    ai_top_k=3,
+                                )
+                            st.session_state["resultats_matching"] = enriched_results
+                            st.session_state["benef_matching_label"] = benef_choisi_label
+                            st.session_state["matching_ai_enriched"] = True
+                            st.rerun()
+                        except DatabaseError:
+                            st.error("Impossible de charger les données nécessaires à l'analyse IA.")
 
                 OBJECTIVE_DIMENSIONS = [
                     ("score_competences",  "🛠️ Compétences techniques", "#2f7cf6"),
