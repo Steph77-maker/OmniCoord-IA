@@ -888,15 +888,35 @@ Contrôles OmniCoord :
                                                 st.rerun()
 
                             st.markdown("#### ➕ Ajouter / renouveler une habilitation")
-                            mode_key = f"new_hab_mode_{row['id']}"
-                            mode_h = st.radio("Validité", ["Avec date d'expiration", "Valide sans date d'expiration"], horizontal=True, key=mode_key)
-                            with st.form(f"add_hab_interv_{row['id']}", clear_on_submit=True):
-                                n_type = st.selectbox("Type d'habilitation", hab_types, key=f"nt_{row['id']}")
-                                n_obt = st.date_input("Date d'obtention", value=datetime.date.today(), key=f"no_{row['id']}")
+                            # Tous les champs sont placés dans le même formulaire afin d'éviter
+                            # qu'un changement de type/date déclenche un rerun Streamlit et
+                            # réinitialise les autres valeurs du renouvellement.
+                            with st.form(f"add_hab_interv_{row['id']}", clear_on_submit=False):
+                                mode_h = st.radio(
+                                    "Validité",
+                                    ["Avec date d'expiration", "Valide sans date d'expiration"],
+                                    horizontal=True,
+                                    key=f"new_hab_mode_{row['id']}",
+                                )
+                                n_type = st.selectbox(
+                                    "Type d'habilitation",
+                                    hab_types,
+                                    key=f"new_hab_type_{row['id']}",
+                                )
+                                n_obt = st.date_input(
+                                    "Date d'obtention",
+                                    value=datetime.date.today(),
+                                    key=f"new_hab_obt_{row['id']}",
+                                )
                                 n_exp = None
                                 if mode_h == "Avec date d'expiration":
-                                    n_exp = st.date_input("Date d'expiration", value=datetime.date.today() + datetime.timedelta(days=365), key=f"ne_{row['id']}")
+                                    n_exp = st.date_input(
+                                        "Date d'expiration",
+                                        value=datetime.date.today() + datetime.timedelta(days=365),
+                                        key=f"new_hab_exp_{row['id']}",
+                                    )
                                 add_h = st.form_submit_button("➕ Ajouter à la fiche")
+
                             if add_h:
                                 if n_exp is not None and n_exp <= n_obt:
                                     st.error("La date d'expiration doit être après la date d'obtention.")
@@ -908,15 +928,40 @@ Contrôles OmniCoord :
                                     if duplicate_reason:
                                         st.warning(duplicate_reason)
                                     else:
-                                        new_h = sb_insert("habilitations", {
-                                            "structure_id": SID, "intervenant_id": str(row["id"]),
-                                            "type_habilitation": canonicalize_habilitation(n_type), "date_obtention": n_obt.isoformat(),
-                                            "date_expiration": n_exp.isoformat() if n_exp is not None else NO_EXPIRY_DATE.isoformat(),
-                                        })
+                                        try:
+                                            new_h = sb_insert("habilitations", {
+                                                "structure_id": SID,
+                                                "intervenant_id": str(row["id"]),
+                                                "type_habilitation": canonicalize_habilitation(n_type),
+                                                "date_obtention": n_obt.isoformat(),
+                                                "date_expiration": n_exp.isoformat() if n_exp is not None else NO_EXPIRY_DATE.isoformat(),
+                                            })
+                                        except Exception:
+                                            logger.exception("Ajout/renouvellement d'habilitation impossible")
+                                            new_h = None
+
                                         if new_h:
-                                            audit("CREATE_HABILITATION", "habilitations", new_h.get("id"), {"intervenant_id": str(row["id"]), "type_canonique": canonicalize_habilitation(n_type)})
+                                            audit(
+                                                "CREATE_HABILITATION",
+                                                "habilitations",
+                                                new_h.get("id"),
+                                                {
+                                                    "intervenant_id": str(row["id"]),
+                                                    "type_canonique": canonicalize_habilitation(n_type),
+                                                },
+                                            )
+                                            # Nettoyage explicite des valeurs mémorisées uniquement après succès.
+                                            for key in (
+                                                f"new_hab_mode_{row['id']}",
+                                                f"new_hab_type_{row['id']}",
+                                                f"new_hab_obt_{row['id']}",
+                                                f"new_hab_exp_{row['id']}",
+                                            ):
+                                                st.session_state.pop(key, None)
                                             st.success("Habilitation ajoutée à la fiche. Le moteur de matching la prendra en compte automatiquement.")
                                             st.rerun()
+                                        else:
+                                            st.error("Impossible d'enregistrer cette habilitation. Vérifiez le type et les dates puis réessayez.")
 
         with tab_ajout:
             with st.form("form_ajout_interv", clear_on_submit=True):
