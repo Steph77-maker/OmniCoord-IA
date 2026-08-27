@@ -12,7 +12,7 @@ import urllib.parse
 import pandas as pd
 import streamlit as st
 from . import core
-from .matching_service import match_beneficiary
+from .matching_service import analyse_candidate_quick, match_beneficiary
 from .planning_service import ensure_no_intervenant_conflict, find_duplicate_interventions
 from .replacement_service import (
     NO_EXPIRY_DATE,
@@ -1217,6 +1217,9 @@ Contrôles OmniCoord :
                     st.session_state.pop("benef_matching_label", None)
                     st.session_state.pop("_ai_error_shown", None)
                     st.session_state.pop("matching_ai_enriched", None)
+                    for _key in list(st.session_state.keys()):
+                        if str(_key).startswith(f"matching_quick_{benef_id}_"):
+                            st.session_state.pop(_key, None)
                     with st.spinner("Préfiltrage et classement métier des candidats..."):
                         resultats = match_beneficiary(
                             SID,
@@ -1236,33 +1239,10 @@ Contrôles OmniCoord :
             if matching_results and same_beneficiary:
                 st.markdown("### 📊 Résultats du matching")
 
-                ai_count = sum(1 for r in matching_results if r.get("ai_used"))
-                if ai_count:
-                    st.success(
-                        f"✨ Analyse IA effectuée sur {ai_count} profil(s). "
-                        "Le classement et le score final restent calculés par OmniCoord."
-                    )
-                else:
-                    st.info(
-                        "⚡ Classement métier disponible immédiatement. "
-                        "Vous pouvez déjà affecter un intervenant, ou demander l'analyse IA du Top 3."
-                    )
-                    if st.button("✨ Analyser le Top 3 avec l'IA", key=f"matching_ai_top3_{benef_id}"):
-                        try:
-                            st.session_state.pop("_ai_error_shown", None)
-                            with st.spinner("Analyse IA qualitative du Top 3..."):
-                                enriched_results = match_beneficiary(
-                                    SID,
-                                    benef_row.to_dict(),
-                                    df_interv_dispo,
-                                    ai_top_k=3,
-                                )
-                            st.session_state["resultats_matching"] = enriched_results
-                            st.session_state["benef_matching_label"] = benef_choisi_label
-                            st.session_state["matching_ai_enriched"] = True
-                            st.rerun()
-                        except DatabaseError:
-                            st.error("Impossible de charger les données nécessaires à l'analyse IA.")
+                st.info(
+                    "⚡ Classement métier disponible immédiatement. "
+                    "Vous pouvez affecter un intervenant tout de suite ou demander une analyse IA rapide sur le ou les candidats de votre choix."
+                )
 
                 OBJECTIVE_DIMENSIONS = [
                     ("score_competences",  "🛠️ Compétences techniques", "#2f7cf6"),
@@ -1303,9 +1283,38 @@ Contrôles OmniCoord :
                         </div>
                     """, unsafe_allow_html=True)
 
+                    # Analyse IA rapide à la demande, candidat par candidat.
+                    intervenant_id_match = str(res.get("intervenant_id", "") or "")
+                    quick_key = f"matching_quick_{benef_id}_{intervenant_id_match}"
+                    quick_result = st.session_state.get(quick_key)
+
+                    if st.button(
+                        "✨ Analyse IA rapide",
+                        key=f"quick_ai_btn_{benef_id}_{intervenant_id_match}",
+                    ):
+                        st.session_state.pop("_ai_error_shown", None)
+                        with st.spinner(f"Analyse rapide de {res.get('intervenant_nom', '')}..."):
+                            quick_result = analyse_candidate_quick(
+                                benef_row.to_dict(),
+                                res,
+                            )
+                        if quick_result:
+                            st.session_state[quick_key] = quick_result
+                        else:
+                            st.session_state.pop(quick_key, None)
+                        st.rerun()
+
+                    quick_result = st.session_state.get(quick_key)
+                    if quick_result:
+                        synthese = str(quick_result.get("synthese", "") or "").strip()
+                        vigilance = str(quick_result.get("vigilance", "") or "").strip()
+                        if synthese:
+                            st.info(f"✨ {synthese}")
+                        if vigilance:
+                            st.warning(f"⚠️ {vigilance}")
+
                     # Affectation directe du référent depuis le matching.
                     # Le matching propose ; la décision reste explicitement humaine.
-                    intervenant_id_match = str(res.get("intervenant_id", "") or "")
                     current_attitre_id = str(benef_row.get("intervenant_attitré_id", "") or "")
                     pending_assign = st.session_state.get("matching_assign_pending") or {}
 
