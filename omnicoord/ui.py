@@ -901,20 +901,35 @@ Contrôles OmniCoord :
                                 if n_exp is not None and n_exp <= n_obt:
                                     st.error("La date d'expiration doit être après la date d'obtention.")
                                 else:
-                                    existing_records = hab_i.to_dict("records") if not hab_i.empty else []
-                                    duplicate_reason = duplicate_habilitation_reason(
-                                        existing_records, n_type, n_obt, permanent=n_exp is None
-                                    )
-                                    if duplicate_reason:
-                                        st.warning(duplicate_reason)
+                                    canon_type = canonicalize_habilitation(n_type)
+                                    payload_h = {
+                                        "type_habilitation": canon_type,
+                                        "date_obtention": n_obt.isoformat(),
+                                        "date_expiration": n_exp.isoformat() if n_exp is not None else NO_EXPIRY_DATE.isoformat(),
+                                    }
+                                    same_type = hab_i[
+                                        hab_i["type_habilitation"].astype(str).map(canonicalize_habilitation) == canon_type
+                                    ].copy() if not hab_i.empty and "type_habilitation" in hab_i.columns else pd.DataFrame()
+                                    if not same_type.empty:
+                                        same_type["_same_obt"] = pd.to_datetime(same_type.get("date_obtention"), errors="coerce").dt.date == n_obt
+                                        same_type["_obt_sort"] = pd.to_datetime(same_type.get("date_obtention"), errors="coerce")
+                                        if "created_at" in same_type.columns:
+                                            same_type["_created_sort"] = pd.to_datetime(same_type["created_at"], errors="coerce")
+                                        else:
+                                            same_type["_created_sort"] = pd.NaT
+                                        same_type = same_type.sort_values(["_same_obt", "_obt_sort", "_created_sort"], ascending=[False, False, False], na_position="last")
+                                        existing_h = same_type.iloc[0]
+                                        if sb_update("habilitations", payload_h, "id", existing_h["id"]):
+                                            audit("UPDATE_HABILITATION", "habilitations", str(existing_h["id"]), {"intervenant_id": str(row["id"]), "type_canonique": canon_type, "motif": "renouvellement"})
+                                            st.success("Habilitation mise à jour. Le moteur de matching la prendra en compte automatiquement.")
+                                            st.rerun()
                                     else:
                                         new_h = sb_insert("habilitations", {
                                             "structure_id": SID, "intervenant_id": str(row["id"]),
-                                            "type_habilitation": canonicalize_habilitation(n_type), "date_obtention": n_obt.isoformat(),
-                                            "date_expiration": n_exp.isoformat() if n_exp is not None else NO_EXPIRY_DATE.isoformat(),
+                                            **payload_h,
                                         })
                                         if new_h:
-                                            audit("CREATE_HABILITATION", "habilitations", new_h.get("id"), {"intervenant_id": str(row["id"]), "type_canonique": canonicalize_habilitation(n_type)})
+                                            audit("CREATE_HABILITATION", "habilitations", new_h.get("id"), {"intervenant_id": str(row["id"]), "type_canonique": canon_type})
                                             st.success("Habilitation ajoutée à la fiche. Le moteur de matching la prendra en compte automatiquement.")
                                             st.rerun()
 
@@ -2116,26 +2131,41 @@ Contrôles OmniCoord :
                             st.error("La date d'expiration doit être après la date d'obtention.")
                         else:
                             target_id = interv_lbl4[interv_sel]
-                            existing_records = []
-                            if not df_habs.empty and "intervenant_id" in df_habs.columns:
-                                existing_records = df_habs[df_habs["intervenant_id"].astype(str) == str(target_id)].to_dict("records")
-                            duplicate_reason = duplicate_habilitation_reason(
-                                existing_records, type_hab, date_obt, permanent=date_exp is None
-                            )
-                            if duplicate_reason:
-                                st.warning(duplicate_reason)
+                            canon_type = canonicalize_habilitation(type_hab)
+                            payload_h = {
+                                "type_habilitation": canon_type,
+                                "date_obtention": date_obt.isoformat(),
+                                # Sentinelle rétrocompatible : évite d'exiger une migration si
+                                # date_expiration est NOT NULL dans une base déjà déployée.
+                                "date_expiration": date_exp.isoformat() if date_exp is not None else NO_EXPIRY_DATE.isoformat(),
+                            }
+                            target_habs = df_habs[
+                                df_habs["intervenant_id"].astype(str) == str(target_id)
+                            ].copy() if not df_habs.empty and "intervenant_id" in df_habs.columns else pd.DataFrame()
+                            same_type = target_habs[
+                                target_habs["type_habilitation"].astype(str).map(canonicalize_habilitation) == canon_type
+                            ].copy() if not target_habs.empty and "type_habilitation" in target_habs.columns else pd.DataFrame()
+                            if not same_type.empty:
+                                same_type["_same_obt"] = pd.to_datetime(same_type.get("date_obtention"), errors="coerce").dt.date == date_obt
+                                same_type["_obt_sort"] = pd.to_datetime(same_type.get("date_obtention"), errors="coerce")
+                                if "created_at" in same_type.columns:
+                                    same_type["_created_sort"] = pd.to_datetime(same_type["created_at"], errors="coerce")
+                                else:
+                                    same_type["_created_sort"] = pd.NaT
+                                same_type = same_type.sort_values(["_same_obt", "_obt_sort", "_created_sort"], ascending=[False, False, False], na_position="last")
+                                existing_h = same_type.iloc[0]
+                                if sb_update("habilitations", payload_h, "id", existing_h["id"]):
+                                    audit("UPDATE_HABILITATION", "habilitations", str(existing_h["id"]), {"intervenant_id": str(target_id), "sans_expiration": date_exp is None, "type_canonique": canon_type, "motif": "renouvellement"})
+                                    st.success("Habilitation mise à jour.")
+                                    st.rerun()
                             else:
                                 new_h = sb_insert("habilitations", {
                                     "structure_id": SID,
                                     "intervenant_id": target_id,
-                                    "type_habilitation": canonicalize_habilitation(type_hab),
-                                    "date_obtention": date_obt.isoformat(),
-                                    # Sentinelle rétrocompatible : évite d'exiger une migration si
-                                    # date_expiration est NOT NULL dans une base déjà déployée.
-                                    "date_expiration": date_exp.isoformat() if date_exp is not None else NO_EXPIRY_DATE.isoformat(),
+                                    **payload_h,
                                 })
                                 if new_h:
-                                    audit("CREATE_HABILITATION", "habilitations", new_h.get("id"), {"sans_expiration": date_exp is None, "type_canonique": canonicalize_habilitation(type_hab)})
+                                    audit("CREATE_HABILITATION", "habilitations", new_h.get("id"), {"sans_expiration": date_exp is None, "type_canonique": canon_type})
                                     st.success("Habilitation ajoutée.")
                                     st.rerun()
 
