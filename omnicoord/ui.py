@@ -1195,6 +1195,10 @@ Contrôles OmniCoord :
             benef_id = benef_labels[benef_choisi_label]
             benef_row = df_benef[df_benef["id"] == benef_id].iloc[0]
 
+            pending_assign = st.session_state.get("matching_assign_pending") or {}
+            if pending_assign and str(pending_assign.get("beneficiary_id", "")) != str(benef_id):
+                st.session_state.pop("matching_assign_pending", None)
+
             st.markdown(f"""
                 <div class="oc-card">
                     <b>Besoins récurrents :</b> {h(benef_row.get('besoins_recurrents', '') or 'Non renseigné')}<br>
@@ -1278,6 +1282,107 @@ Contrôles OmniCoord :
                             </div>
                         </div>
                     """, unsafe_allow_html=True)
+
+                    # Affectation directe du référent depuis le matching.
+                    # Le matching propose ; la décision reste explicitement humaine.
+                    intervenant_id_match = str(res.get("intervenant_id", "") or "")
+                    current_attitre_id = str(benef_row.get("intervenant_attitré_id", "") or "")
+                    pending_assign = st.session_state.get("matching_assign_pending") or {}
+
+                    if intervenant_id_match and current_attitre_id == intervenant_id_match:
+                        st.success(f"✅ {res.get('intervenant_nom', '')} est déjà l'intervenant attitré de {benef_choisi_label}.")
+                    else:
+                        if st.button(
+                            "👤 Affecter comme intervenant attitré",
+                            key=f"assign_ref_{benef_id}_{intervenant_id_match}",
+                        ):
+                            st.session_state["matching_assign_pending"] = {
+                                "beneficiary_id": str(benef_id),
+                                "beneficiary_label": benef_choisi_label,
+                                "intervenant_id": intervenant_id_match,
+                                "intervenant_nom": str(res.get("intervenant_nom", "") or ""),
+                            }
+                            st.rerun()
+
+                        pending_assign = st.session_state.get("matching_assign_pending") or {}
+                        if (
+                            str(pending_assign.get("beneficiary_id", "")) == str(benef_id)
+                            and str(pending_assign.get("intervenant_id", "")) == intervenant_id_match
+                        ):
+                            st.warning(
+                                f"Confirmer l'affectation de {pending_assign.get('intervenant_nom', '')} "
+                                f"comme intervenant attitré de {benef_choisi_label} ?"
+                            )
+                            c_confirm_ref, c_cancel_ref = st.columns(2)
+
+                            if c_confirm_ref.button(
+                                "✅ Confirmer l'affectation",
+                                key=f"confirm_ref_{benef_id}_{intervenant_id_match}",
+                                type="primary",
+                            ):
+                                # Relecture juste avant l'écriture : évite d'affecter
+                                # une fiche archivée ou un intervenant devenu indisponible.
+                                benef_check = sb_select(
+                                    "beneficiaires",
+                                    {"structure_id": SID, "id": str(benef_id)},
+                                )
+                                interv_check = sb_select(
+                                    "intervenants",
+                                    {"structure_id": SID, "id": intervenant_id_match},
+                                )
+
+                                if benef_check.empty:
+                                    st.error("Le bénéficiaire n'est plus disponible. Rechargez le matching.")
+                                elif (
+                                    "deleted_at" in benef_check.columns
+                                    and benef_check.iloc[0].get("deleted_at") is not None
+                                    and not pd.isna(benef_check.iloc[0].get("deleted_at"))
+                                ):
+                                    st.error("Ce bénéficiaire est archivé et ne peut plus recevoir d'intervenant attitré.")
+                                elif interv_check.empty:
+                                    st.error("L'intervenant n'est plus disponible. Rechargez le matching.")
+                                else:
+                                    interv_now = interv_check.iloc[0]
+                                    interv_archived = (
+                                        "deleted_at" in interv_check.columns
+                                        and interv_now.get("deleted_at") is not None
+                                        and not pd.isna(interv_now.get("deleted_at"))
+                                    )
+                                    if interv_archived:
+                                        st.error("Cet intervenant est archivé et ne peut pas être affecté.")
+                                    elif str(interv_now.get("statut_dispo", "") or "") == "Indisponible":
+                                        st.error("Cet intervenant est désormais indisponible. Relancez le matching.")
+                                    elif sb_update(
+                                        "beneficiaires",
+                                        {"intervenant_attitré_id": intervenant_id_match},
+                                        "id",
+                                        str(benef_id),
+                                    ):
+                                        audit(
+                                            "ASSIGN_REFERENT_FROM_MATCHING",
+                                            "beneficiaires",
+                                            str(benef_id),
+                                            {
+                                                "intervenant_id": intervenant_id_match,
+                                                "intervenant_nom": str(res.get("intervenant_nom", "") or ""),
+                                                "score_matching": score,
+                                            },
+                                        )
+                                        st.session_state.pop("matching_assign_pending", None)
+                                        st.session_state.pop("dashboard_ai_summary", None)
+                                        st.session_state.pop("dashboard_ai_fingerprint", None)
+                                        st.success(
+                                            f"✅ {res.get('intervenant_nom', '')} est maintenant "
+                                            f"l'intervenant attitré de {benef_choisi_label}."
+                                        )
+                                        st.rerun()
+
+                            if c_cancel_ref.button(
+                                "Annuler",
+                                key=f"cancel_ref_{benef_id}_{intervenant_id_match}",
+                            ):
+                                st.session_state.pop("matching_assign_pending", None)
+                                st.rerun()
 
                     # Alertes
                     if res.get("alerte_habilitation"):
