@@ -7,6 +7,7 @@ import hashlib
 import html
 import logging
 import math
+import re
 import urllib.parse
 import pandas as pd
 import streamlit as st
@@ -162,6 +163,41 @@ def _time_minutes(value):
         except ValueError:
             continue
     return None
+
+
+def _parse_besoins_horaires(value):
+    """Extrait une plage horaire HH:MM-HH:MM depuis le texte existant si possible."""
+    text = str(value or "")
+    matches = re.findall(r"\b([01]?\d|2[0-3])\s*[hH:]\s*([0-5]\d)\b", text)
+    if len(matches) >= 2:
+        h1, m1 = map(int, matches[0])
+        h2, m2 = map(int, matches[1])
+        return datetime.time(h1, m1), datetime.time(h2, m2)
+
+    compact = re.findall(r"\b([01]?\d|2[0-3])\s*[hH]\b", text)
+    if len(compact) >= 2:
+        return datetime.time(int(compact[0]), 0), datetime.time(int(compact[1]), 0)
+
+    return datetime.time(8, 0), datetime.time(12, 0)
+
+
+def _besoin_horaire_label(start: datetime.time, end: datetime.time) -> str:
+    """Produit un libellé cohérent à partir des heures, sans saisie libre contradictoire."""
+    start_m = start.hour * 60 + start.minute
+    end_m = end.hour * 60 + end.minute
+
+    if end_m <= start_m:
+        raise ValueError("L'heure de fin doit être après l'heure de début.")
+
+    midpoint = (start_m + end_m) / 2
+    if midpoint < 12 * 60:
+        periode = "Matin"
+    elif midpoint < 18 * 60:
+        periode = "Après-midi"
+    else:
+        periode = "Soir"
+
+    return f"{periode} entre {start.strftime('%Hh%M')} et {end.strftime('%Hh%M')}."
 
 
 def _dashboard_latest_habilitations(df_habs):
@@ -1455,7 +1491,12 @@ Contrôles OmniCoord :
                                     eb_ctel = st.text_input("Tél. contact d'urgence", value=str(row.get("contact_urgence_tel") or ""), key=f"bct_{row['id']}")
                                     eb_besoins = st.text_area("Besoins récurrents", value=str(row.get("besoins_recurrents") or ""), key=f"bb_{row['id']}")
                                     eb_gestes = st.text_area("Gestes techniques requis", value=str(row.get("gestes_techniques") or ""), key=f"bgest_{row['id']}")
-                                    eb_horaires = st.text_input("Besoins horaires", value=str(row.get("besoins_horaires") or ""), key=f"bh_{row['id']}")
+                                    bh_debut0, bh_fin0 = _parse_besoins_horaires(row.get("besoins_horaires"))
+                                    bhc1, bhc2 = st.columns(2)
+                                    with bhc1:
+                                        eb_horaire_debut = st.time_input("Début du besoin", value=bh_debut0, key=f"bh_debut_{row['id']}")
+                                    with bhc2:
+                                        eb_horaire_fin = st.time_input("Fin du besoin", value=bh_fin0, key=f"bh_fin_{row['id']}")
                                     eb_notes = st.text_area("Notes", value=str(row.get("notes") or ""), key=f"bnotes_{row['id']}")
                                 opts_i = {"Non défini": None}
                                 opts_i.update({v: k for k, v in interv_map.items()})
@@ -1467,11 +1508,16 @@ Contrôles OmniCoord :
                                 if not eb_nom.strip() or not eb_prenom.strip():
                                     st.error("Le nom et le prénom sont obligatoires.")
                                 else:
-                                    p_b = {"nom": eb_nom.strip(), "prenom": eb_prenom.strip(), "adresse": eb_adresse.strip(), "telephone": eb_tel.strip(), "niveau_dependance": eb_gir, "statut": eb_statut, "contact_urgence_nom": eb_cnom.strip(), "contact_urgence_tel": eb_ctel.strip(), "besoins_recurrents": eb_besoins.strip(), "gestes_techniques": eb_gestes.strip(), "besoins_horaires": eb_horaires.strip(), "notes": eb_notes.strip(), "intervenant_attitré_id": opts_i[eb_att]}
-                                    if sb_update("beneficiaires", p_b, "id", row["id"]):
-                                        audit("UPDATE_BENEFICIAIRE", "beneficiaires", str(row["id"]), {"champs": list(p_b.keys())})
-                                        st.success("Fiche bénéficiaire mise à jour.")
-                                        st.rerun()
+                                    try:
+                                        besoins_horaires_calcule = _besoin_horaire_label(eb_horaire_debut, eb_horaire_fin)
+                                    except ValueError as exc:
+                                        st.error(str(exc))
+                                    else:
+                                        p_b = {"nom": eb_nom.strip(), "prenom": eb_prenom.strip(), "adresse": eb_adresse.strip(), "telephone": eb_tel.strip(), "niveau_dependance": eb_gir, "statut": eb_statut, "contact_urgence_nom": eb_cnom.strip(), "contact_urgence_tel": eb_ctel.strip(), "besoins_recurrents": eb_besoins.strip(), "gestes_techniques": eb_gestes.strip(), "besoins_horaires": besoins_horaires_calcule, "notes": eb_notes.strip(), "intervenant_attitré_id": opts_i[eb_att]}
+                                        if sb_update("beneficiaires", p_b, "id", row["id"]):
+                                            audit("UPDATE_BENEFICIAIRE", "beneficiaires", str(row["id"]), {"champs": list(p_b.keys())})
+                                            st.success("Fiche bénéficiaire mise à jour.")
+                                            st.rerun()
 
                             st.markdown("---")
                             confirm_b = st.checkbox("Confirmer l'archivage", key=f"confirm_del_b_{row['id']}", help="La fiche est retirée des listes actives mais l'historique est conservé.")
@@ -1495,7 +1541,11 @@ Contrôles OmniCoord :
                     contact_urgence_tel_b = st.text_input("Tél. contact d'urgence")
                     besoins_rec = st.text_area("Besoins récurrents")
                     gestes_b = st.text_area("Gestes techniques requis")
-                    horaires_b = st.text_input("Besoins horaires")
+                    bh_new_c1, bh_new_c2 = st.columns(2)
+                    with bh_new_c1:
+                        horaires_debut_b = st.time_input("Début du besoin", value=datetime.time(8, 0), key="new_bh_debut")
+                    with bh_new_c2:
+                        horaires_fin_b = st.time_input("Fin du besoin", value=datetime.time(12, 0), key="new_bh_fin")
                     notes_b = st.text_area("Notes")
 
                 opts_att = {"Non défini": None}
@@ -1513,15 +1563,21 @@ Contrôles OmniCoord :
                     if duplicate_b:
                         st.error("Un bénéficiaire portant ce nom et ce prénom existe déjà dans la liste active.")
                     else:
-                        new_b = sb_insert("beneficiaires", {
-                        "structure_id": SID, "nom": nom_b.strip(), "prenom": prenom_b.strip(),
-                        "adresse": adresse_b, "telephone": telephone_b, "niveau_dependance": niveau_dep,
-                        "gestes_techniques": gestes_b, "besoins_horaires": horaires_b,
-                        "besoins_recurrents": besoins_rec, "notes": notes_b,
-                        "contact_urgence_nom": contact_urgence_nom_b, "contact_urgence_tel": contact_urgence_tel_b,
-                        "intervenant_attitré_id": opts_att[att_sel],
-                        "statut": "Actif", "date_creation": datetime.date.today().isoformat()
-                        })
+                        try:
+                            besoins_horaires_b = _besoin_horaire_label(horaires_debut_b, horaires_fin_b)
+                        except ValueError as exc:
+                            st.error(str(exc))
+                            new_b = None
+                        else:
+                            new_b = sb_insert("beneficiaires", {
+                            "structure_id": SID, "nom": nom_b.strip(), "prenom": prenom_b.strip(),
+                            "adresse": adresse_b, "telephone": telephone_b, "niveau_dependance": niveau_dep,
+                            "gestes_techniques": gestes_b, "besoins_horaires": besoins_horaires_b,
+                            "besoins_recurrents": besoins_rec, "notes": notes_b,
+                            "contact_urgence_nom": contact_urgence_nom_b, "contact_urgence_tel": contact_urgence_tel_b,
+                            "intervenant_attitré_id": opts_att[att_sel],
+                            "statut": "Actif", "date_creation": datetime.date.today().isoformat()
+                            })
                         if new_b:
                             audit("CREATE_BENEFICIAIRE", "beneficiaires", new_b.get("id"))
                             st.success(f"{prenom_b} {nom_b} ajouté(e).")
