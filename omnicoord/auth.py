@@ -166,17 +166,40 @@ def _render_invitation_password_setup() -> bool:
             if not user:
                 raise RuntimeError("Utilisateur invité introuvable")
 
+            # Le mot de passe est désormais enregistré. Pour terminer l'activation,
+            # on repart volontairement par le même flux de connexion que celui qui
+            # fonctionne lors d'une connexion classique. Cela évite de réutiliser
+            # la session transitoire issue du token d'invitation pour les lectures RLS.
+            invite_email = (st.session_state.get("_invite_email", "") or getattr(user, "email", "") or "").strip().lower()
+            if not invite_email:
+                raise RuntimeError("Email de l'utilisateur invité introuvable")
+
+            try:
+                client.auth.sign_out()
+            except Exception:
+                logger.warning("Impossible de fermer proprement la session d'invitation")
+
+            reset_user_client()
+            login_client = get_supabase()
+            login_res = login_client.auth.sign_in_with_password({
+                "email": invite_email,
+                "password": p1,
+            })
+            user = login_res.user
+            if not user:
+                raise RuntimeError("Connexion après activation impossible")
+
             profil, structure_nom = _load_authenticated_profile(str(user.id))
             if not profil:
-                client.auth.sign_out()
+                login_client.auth.sign_out()
                 st.error("Votre accès existe mais son profil OmniCoord est introuvable. Contactez l'administrateur.")
                 return False
             if not _profile_access_is_valid(profil):
-                client.auth.sign_out()
+                login_client.auth.sign_out()
                 st.error("Votre période d'accès a expiré. Contactez l'administrateur.")
                 return False
 
-            _set_authenticated_session(user, profil, structure_nom, st.session_state.get("_invite_email"))
+            _set_authenticated_session(user, profil, structure_nom, invite_email)
             audit("ACCEPT_INVITATION", "profils", str(user.id))
             for key in (
                 "_invite_verified", "_invite_user_id", "_invite_email",
