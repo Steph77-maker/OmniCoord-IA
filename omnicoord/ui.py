@@ -591,7 +591,18 @@ def render():
     if IS_ADMIN:
         _onglets.insert(0, "🛠️ Administration")
 
-    onglet = st.sidebar.radio("Navigation", _onglets, label_visibility="collapsed")
+    # Une action métier peut demander une navigation précise au prochain rerun
+    # (ex. depuis une urgence du tableau de bord). La valeur du widget est mise
+    # à jour AVANT son instanciation afin de respecter les règles de session_state.
+    nav_target = st.session_state.pop("_nav_target", None)
+    if "main_navigation" not in st.session_state or st.session_state.get("main_navigation") not in _onglets:
+        st.session_state["main_navigation"] = _onglets[0]
+    if nav_target in _onglets:
+        st.session_state["main_navigation"] = nav_target
+
+    onglet = st.sidebar.radio(
+        "Navigation", _onglets, label_visibility="collapsed", key="main_navigation"
+    )
 
     st.markdown(f"# {onglet}")
     st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
@@ -678,6 +689,37 @@ Contrôles OmniCoord :
                 with st.expander(f"🔴 Priorité critique ({len(groups['critical'])})", expanded=True):
                     for a in groups["critical"]:
                         st.error(_dashboard_plain(a))
+
+                    # Les urgences opérationnelles sont directement actionnables depuis
+                    # le centre de pilotage : un clic ouvre Plannings & Urgences sur
+                    # l'onglet Urgences et place la mission concernée en tête de liste.
+                    df_dash_urg = dashboard_data.get("interventions", pd.DataFrame())
+                    if not df_dash_urg.empty and "statut" in df_dash_urg.columns:
+                        df_dash_urg = df_dash_urg[
+                            df_dash_urg["statut"].astype(str).isin(["Urgence à pourvoir", "Absence"])
+                        ].copy()
+                    if not df_dash_urg.empty:
+                        dash_benef = dashboard_data.get("beneficiaires", pd.DataFrame())
+                        dash_benef_names = {
+                            str(r["id"]): f"{r.get('prenom', '')} {r.get('nom', '')}".strip()
+                            for _, r in dash_benef.iterrows()
+                        } if not dash_benef.empty else {}
+                        st.caption("⚡ Actions rapides")
+                        for _, urg_row in df_dash_urg.sort_values(["date_intervention", "heure_debut"]).iterrows():
+                            urg_id = str(urg_row.get("id", ""))
+                            urg_benef = dash_benef_names.get(str(urg_row.get("beneficiaire_id", "")), "Bénéficiaire")
+                            urg_date = pd.to_datetime(urg_row.get("date_intervention"), errors="coerce")
+                            urg_date_label = date_fr(urg_date.date(), "court") if pd.notna(urg_date) else str(urg_row.get("date_intervention", ""))
+                            urg_start = str(urg_row.get("heure_debut", ""))
+                            if st.button(
+                                f"🚨 Traiter l'urgence — {urg_benef} · {urg_date_label} {urg_start}",
+                                key=f"dashboard_treat_urgency_{urg_id}",
+                                use_container_width=True,
+                            ):
+                                st.session_state["_nav_target"] = "📅 Plannings & Urgences"
+                                st.session_state["_planning_default_tab"] = "🚨 Urgences"
+                                st.session_state["_planning_focus_urgence_id"] = urg_id
+                                st.rerun()
             if groups["warning"]:
                 with st.expander(f"🟠 À traiter prochainement ({len(groups['warning'])})", expanded=True):
                     for a in groups["warning"]:
@@ -1973,7 +2015,14 @@ Contrôles OmniCoord :
     #  📅 PLANNINGS & URGENCES
     # ============================================================
     elif onglet == "📅 Plannings & Urgences":
-        tab_plan, tab_ajout_p, tab_urg = st.tabs(["📊 Planning hebdo", "➕ Planifier", "🚨 Urgences"])
+        planning_default_tab = st.session_state.pop("_planning_default_tab", "📊 Planning hebdo")
+        if planning_default_tab not in ("📊 Planning hebdo", "➕ Planifier", "🚨 Urgences"):
+            planning_default_tab = "📊 Planning hebdo"
+        planning_focus_urgence_id = st.session_state.pop("_planning_focus_urgence_id", None)
+        tab_plan, tab_ajout_p, tab_urg = st.tabs(
+            ["📊 Planning hebdo", "➕ Planifier", "🚨 Urgences"],
+            default=planning_default_tab,
+        )
 
         df_benef3 = sb_select("beneficiaires", {"structure_id": SID, "statut": "Actif"}, order="nom")
         if not df_benef3.empty and "deleted_at" in df_benef3.columns:
@@ -2011,7 +2060,22 @@ Contrôles OmniCoord :
             benef_noms = {str(r["id"]): f"{r['prenom']} {r['nom']}" for _, r in df_benef3.iterrows()}
             dates_sem = [lundi + datetime.timedelta(days=i) for i in range(7)]
 
-            if df_interv3.empty:
+            # Une mission existe dans le planning de l'agence même lorsqu'aucun
+            # intervenant n'est encore affecté. On la rend donc visible immédiatement
+            # sur une ligne dédiée au lieu d'attendre son affectation depuis Urgences.
+            df_unassigned_sem = pd.DataFrame()
+            if not df_sem.empty and "statut" in df_sem.columns and "intervenant_id" in df_sem.columns:
+                interv_id_text = df_sem["intervenant_id"].astype(str).str.strip()
+                unassigned_mask = (
+                    df_sem["statut"].astype(str).isin(["Urgence à pourvoir", "Absence"])
+                    & (
+                        df_sem["intervenant_id"].isna()
+                        | interv_id_text.isin(["", "None", "nan", "<NA>"])
+                    )
+                )
+                df_unassigned_sem = df_sem[unassigned_mask].copy()
+
+            if df_interv3.empty and df_unassigned_sem.empty:
                 st.info("Ajoutez des intervenants pour voir le planning.")
             else:
                 headers_html = '<th class="col-intervenant">Intervenant</th>'
@@ -2044,6 +2108,24 @@ Contrôles OmniCoord :
                                 css = " urgence" if iv["statut"] in ("Urgence à pourvoir", "Absence") else (" realise" if iv["statut"]=="Réalisé" else (" annule" if iv["statut"]=="Annulé" else ""))
                                 b = h(benef_noms.get(str(iv.get("beneficiaire_id","")), "—"))
                                 cell += f'<div class="planning-cell{css}"><b>{h(str(iv["heure_debut"]))}–{h(str(iv["heure_fin"]))}</b><br>{b}<br><span style="color:#8996a3;font-size:11px;">{h(str(iv["type_intervention"]))}</span></div>'
+                            row_html += f'<td>{cell}</td>'
+                    rows_html += f"<tr>{row_html}</tr>"
+
+                if not df_unassigned_sem.empty:
+                    row_html = '<td class="col-intervenant">🚨 À pourvoir / Non affecté</td>'
+                    for d in dates_sem:
+                        ivs = df_unassigned_sem[df_unassigned_sem["date_intervention"] == d]
+                        if ivs.empty:
+                            row_html += '<td><div class="planning-empty">·</div></td>'
+                        else:
+                            cell = ""
+                            for _, iv in ivs.iterrows():
+                                b = h(benef_noms.get(str(iv.get("beneficiaire_id", "")), "—"))
+                                cell += (
+                                    f'<div class="planning-cell urgence"><b>{h(str(iv["heure_debut"]))}–{h(str(iv["heure_fin"]))}</b><br>'
+                                    f'{b}<br><span style="color:#e0554f;font-size:11px;">'
+                                    f'{h(str(iv["type_intervention"]))} · À pourvoir</span></div>'
+                                )
                             row_html += f'<td>{cell}</td>'
                     rows_html += f"<tr>{row_html}</tr>"
 
@@ -2282,8 +2364,13 @@ Contrôles OmniCoord :
                 st.success("✅ Aucune urgence en cours.")
             else:
                 benef_by_id = {str(r["id"]): r.to_dict() for _, r in df_benef3.iterrows()}
+                if planning_focus_urgence_id:
+                    df_urgs["_dashboard_focus"] = (df_urgs["id"].astype(str) != str(planning_focus_urgence_id)).astype(int)
+                    df_urgs = df_urgs.sort_values(["_dashboard_focus", "date_intervention", "heure_debut"])
                 for _, urg in df_urgs.iterrows():
                     urg_dict = urg.to_dict()
+                    if planning_focus_urgence_id and str(urg.get("id", "")) == str(planning_focus_urgence_id):
+                        st.info("🎯 Urgence sélectionnée depuis le tableau de bord — vous pouvez la traiter immédiatement ci-dessous.")
                     benef = benef_by_id.get(str(urg.get("beneficiaire_id", "")), {})
                     b = h(f"{benef.get('prenom', '')} {benef.get('nom', '')}".strip() or "Inconnu")
                     req = required_habilitations(urg_dict)
