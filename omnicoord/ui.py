@@ -2995,33 +2995,59 @@ Contrôles OmniCoord :
                     """, unsafe_allow_html=True)
 
                     with st.expander(f"⚙️ Gérer — {email_c}"):
-                        col_g1, col_g2, col_g3 = st.columns(3)
+                        quota_actuel = int(client.get("quota_max_ia", TRIAL_AI_QUOTA) or 0)
+                        quota_utilise = int(client.get("nb_requetes_ia", 0) or 0)
+
+                        # Résumé commercial : la fiche affiche uniquement les actions cohérentes
+                        # avec le forfait courant. Les exceptions restent disponibles dans
+                        # « Paramètres avancés » afin de ne pas mélanger gestion normale et dérogations.
+                        if statut_c == "PRO":
+                            st.success(
+                                f"💳 **Abonnement PRO actif** · Quota inclus : **{PRO_AI_QUOTA} requêtes / mois** "
+                                f"· Utilisées : **{quota_utilise}/{quota_actuel}**"
+                            )
+                        elif statut_c == "SUSPENDU":
+                            st.error(
+                                f"⛔ **Abonnement suspendu** · Accès client bloqué · "
+                                f"Quota conservé : **{quota_utilise}/{quota_actuel}**"
+                            )
+                        else:
+                            st.info(
+                                f"🕒 **Essai en cours jusqu'au {date_fr(date_fin_c, 'court')}** · "
+                                f"Quota inclus : **{TRIAL_AI_QUOTA} requêtes** · Utilisées : **{quota_utilise}/{quota_actuel}**"
+                            )
+
+                        col_g1, col_g2 = st.columns(2)
 
                         with col_g1:
-                            # Une prolongation concerne uniquement une période d'essai.
-                            jours_prolonger = st.number_input(
-                                "Prolonger l'essai (jours)",
-                                min_value=1,
-                                value=30,
-                                key=f"prol_{client['id']}",
-                                disabled=(statut_c != "ESSAI"),
-                            )
-                            if st.button(
-                                "📅 Prolonger l'essai",
-                                key=f"btn_prol_{client['id']}",
-                                disabled=(statut_c != "ESSAI"),
-                            ):
-                                nouvelle_fin = (datetime.date.today() + datetime.timedelta(days=int(jours_prolonger))).isoformat()
-                                if sb_update("profils", {"date_fin_essai": nouvelle_fin}, "id", str(client["id"])):
-                                    audit("PROLONGER_ACCES", "profils", str(client["id"]), {"nouvelle_fin": nouvelle_fin})
-                                    st.success(f"Essai prolongé jusqu'au {date_fr(nouvelle_fin, 'court')}")
-                                    st.rerun()
+                            if statut_c == "ESSAI":
+                                jours_prolonger = st.number_input(
+                                    "Prolonger l'essai (jours)",
+                                    min_value=1,
+                                    value=30,
+                                    key=f"prol_{client['id']}",
+                                )
+                                if st.button("📅 Prolonger l'essai", key=f"btn_prol_{client['id']}"):
+                                    nouvelle_fin = (datetime.date.today() + datetime.timedelta(days=int(jours_prolonger))).isoformat()
+                                    if sb_update("profils", {"date_fin_essai": nouvelle_fin}, "id", str(client["id"])):
+                                        audit("PROLONGER_ACCES", "profils", str(client["id"]), {"nouvelle_fin": nouvelle_fin})
+                                        st.success(f"Essai prolongé jusqu'au {date_fr(nouvelle_fin, 'court')}")
+                                        st.rerun()
+                            elif statut_c == "PRO":
+                                st.markdown(f"**Quota IA inclus**  \n{PRO_AI_QUOTA} requêtes / mois")
+                                st.caption("La date de fin d'essai n'est plus utilisée pour un abonnement PRO.")
+                            else:
+                                st.markdown("**Accès client**  \nSuspendu")
+                                st.caption("Le compte pourra être réactivé en choisissant ESSAI ou PRO.")
 
                         with col_g2:
                             # Changer le statut applique automatiquement le quota du forfait.
-                            nv_statut = st.selectbox("Statut abonnement", ["ESSAI", "PRO", "SUSPENDU"],
-                                                      index=["ESSAI", "PRO", "SUSPENDU"].index(statut_c) if statut_c in ["ESSAI", "PRO", "SUSPENDU"] else 0,
-                                                      key=f"stat_{client['id']}")
+                            nv_statut = st.selectbox(
+                                "Statut de l'abonnement",
+                                ["ESSAI", "PRO", "SUSPENDU"],
+                                index=["ESSAI", "PRO", "SUSPENDU"].index(statut_c) if statut_c in ["ESSAI", "PRO", "SUSPENDU"] else 0,
+                                key=f"stat_{client['id']}",
+                            )
                             if st.button("💳 Mettre à jour le statut", key=f"btn_stat_{client['id']}"):
                                 update_abonnement = {"statut_abonnement": nv_statut}
                                 if nv_statut == "PRO" and statut_c != "PRO":
@@ -3046,22 +3072,34 @@ Contrôles OmniCoord :
                                         st.success("Statut mis à jour → SUSPENDU")
                                     st.rerun()
 
-                        with col_g3:
-                            # Modifier le quota IA
-                            nv_quota = st.number_input("Quota IA max", min_value=1, value=int(client.get("quota_max_ia", 20)), key=f"quota_{client['id']}")
-                            if st.button("🤖 Modifier le quota", key=f"btn_quota_{client['id']}"):
-                                if sb_update("profils", {"quota_max_ia": int(nv_quota)}, "id", str(client["id"])):
-                                    audit("UPDATE_QUOTA", "profils", str(client["id"]), {"quota": nv_quota})
-                                    st.success(f"Quota IA mis à jour → {nv_quota}")
-                                    st.rerun()
+                        with st.expander("⚙️ Paramètres avancés", expanded=False):
+                            st.caption(
+                                "Réservé aux exceptions commerciales ou au support. "
+                                "Le quota normal est appliqué automatiquement selon le forfait."
+                            )
+                            adv_c1, adv_c2 = st.columns(2)
+                            with adv_c1:
+                                nv_quota = st.number_input(
+                                    "Quota IA personnalisé",
+                                    min_value=1,
+                                    value=quota_actuel,
+                                    key=f"quota_{client['id']}",
+                                )
+                                if st.button("🤖 Appliquer le quota personnalisé", key=f"btn_quota_{client['id']}"):
+                                    if sb_update("profils", {"quota_max_ia": int(nv_quota)}, "id", str(client["id"])):
+                                        audit("UPDATE_QUOTA", "profils", str(client["id"]), {"quota": int(nv_quota), "mode": "exception_admin"})
+                                        st.success(f"Quota IA personnalisé → {int(nv_quota)}")
+                                        st.rerun()
+                            with adv_c2:
+                                st.markdown("**Compteur du cycle courant**")
+                                st.caption(f"{quota_utilise} requête(s) utilisée(s)")
+                                if st.button("🔄 Remettre le compteur IA à 0", key=f"reset_{client['id']}"):
+                                    if sb_update("profils", {"nb_requetes_ia": 0}, "id", str(client["id"])):
+                                        audit("RESET_QUOTA", "profils", str(client["id"]), {"ancien_compteur": quota_utilise})
+                                        st.success("Compteur IA remis à zéro.")
+                                        st.rerun()
 
                         st.markdown("<br>", unsafe_allow_html=True)
-
-                        # Remettre le quota IA à zéro
-                        if st.button("🔄 Remettre le compteur IA à 0", key=f"reset_{client['id']}"):
-                            if sb_update("profils", {"nb_requetes_ia": 0}, "id", str(client["id"])):
-                                st.success("Compteur IA remis à zéro.")
-                                st.rerun()
 
                         # Envoyer un rappel de connexion sans jamais transmettre de mot de passe
                         if st.button("📧 Envoyer un rappel de connexion", key=f"remail_{client['id']}"):
