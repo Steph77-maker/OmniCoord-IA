@@ -48,6 +48,7 @@ def _set_authenticated_session(user, profil: dict, structure_nom: str, email: st
         "structure_nom": structure_nom,
         "statut_abonnement": profil.get("statut_abonnement", "ESSAI"),
         "quota_max_ia": profil.get("quota_max_ia", 0),
+        "date_fin_essai": profil.get("date_fin_essai"),
         "_auth_last_verified": time.monotonic(),
         "mail_config": {
             "email": profil.get("mail_smtp_email", ""),
@@ -57,12 +58,37 @@ def _set_authenticated_session(user, profil: dict, structure_nom: str, email: st
 
 
 def _profile_access_is_valid(profil: dict) -> bool:
-    """Bloque les comptes clients arrivés à échéance."""
-    date_fin_raw = profil.get("date_fin_essai")
-    if not date_fin_raw or profil.get("est_admin", False):
+    """Applique les règles d'accès commerciales sans faire expirer un abonnement PRO."""
+    if profil.get("est_admin", False):
         return True
-    date_fin = datetime.date.fromisoformat(str(date_fin_raw))
+
+    statut = str(profil.get("statut_abonnement", "ESSAI") or "ESSAI").strip().upper()
+    if statut == "PRO":
+        return True
+    if statut == "SUSPENDU":
+        return False
+    if statut != "ESSAI":
+        return False
+
+    date_fin_raw = profil.get("date_fin_essai")
+    if not date_fin_raw:
+        return False
+    try:
+        date_fin = datetime.date.fromisoformat(str(date_fin_raw))
+    except (TypeError, ValueError):
+        logger.error("Date de fin d'essai invalide pour le profil %s", profil.get("id"))
+        return False
     return datetime.date.today() <= date_fin
+
+
+def _profile_access_message(profil: dict) -> str:
+    """Message utilisateur cohérent avec le statut commercial du compte."""
+    statut = str(profil.get("statut_abonnement", "ESSAI") or "ESSAI").strip().upper()
+    if statut == "SUSPENDU":
+        return "Votre abonnement est suspendu. Contactez l'administrateur."
+    if statut == "ESSAI":
+        return "Votre période d'essai a expiré. Contactez l'administrateur."
+    return "Votre accès OmniCoord n'est pas actif. Contactez l'administrateur."
 
 
 def _query_param(name: str) -> str:
@@ -196,7 +222,7 @@ def _render_invitation_password_setup() -> bool:
                 return False
             if not _profile_access_is_valid(profil):
                 login_client.auth.sign_out()
-                st.error("Votre période d'accès a expiré. Contactez l'administrateur.")
+                st.error(_profile_access_message(profil))
                 return False
 
             _set_authenticated_session(user, profil, structure_nom, invite_email)
@@ -290,7 +316,7 @@ def _process_pending_login() -> bool:
 
         if not _profile_access_is_valid(profil):
             client.auth.sign_out()
-            st.error("Votre période d'accès a expiré. Contactez l'administrateur.")
+            st.error(_profile_access_message(profil))
             return False
 
         enregistrer_tentative(email_saisi, True)
@@ -326,12 +352,33 @@ def check_password() -> bool:
         if now - last_verified < 60:
             return True
         try:
-            if get_supabase().auth.get_user().user:
-                st.session_state["_auth_last_verified"] = now
-                return True
+            client = get_supabase()
+            user = client.auth.get_user().user
+            if user:
+                profil, structure_nom = _load_authenticated_profile(str(user.id))
+                if profil and _profile_access_is_valid(profil):
+                    _set_authenticated_session(
+                        user,
+                        profil,
+                        structure_nom,
+                        st.session_state.get("user_email"),
+                    )
+                    return True
+                if profil:
+                    st.error(_profile_access_message(profil))
+                else:
+                    st.error("Profil introuvable. Contactez l'administrateur.")
+                try:
+                    client.auth.sign_out()
+                except Exception:
+                    logger.warning("Impossible de fermer une session devenue invalide")
         except Exception:
             logger.warning("Session Streamlit présente mais session Supabase invalide")
-        for key in ["password_correct", "user_id", "is_admin", "structure_id", "_auth_last_verified"]:
+        for key in [
+            "password_correct", "user_id", "user_email", "is_admin", "structure_id",
+            "structure_nom", "statut_abonnement", "quota_max_ia", "date_fin_essai",
+            "_auth_last_verified",
+        ]:
             st.session_state.pop(key, None)
 
     if st.session_state.get("_login_pending", False):
