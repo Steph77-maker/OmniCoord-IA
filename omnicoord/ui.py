@@ -25,6 +25,14 @@ from .exceptions import ValidationError, DatabaseError
 from .cv_service import analyse_cv
 from .compliance import CANONICAL_HABILITATIONS, canonical_key, canonicalize_habilitation, duplicate_habilitation_reason
 from .admin_service import create_invited_auth_user
+from .stripe_service import (
+    BillingConfigurationError,
+    BillingError,
+    create_checkout_session,
+    create_portal_session,
+    get_billing_state,
+    stripe_is_configured,
+)
 
 # Aliases conservés pour limiter les changements de comportement pendant la migration.
 sb = core.sb
@@ -505,6 +513,18 @@ def render():
     SID = st.session_state["structure_id"]
     USER_ID = st.session_state["user_id"]
     IS_ADMIN = st.session_state.get("is_admin", False)
+
+    # Retour depuis Stripe Checkout. Le retour navigateur ne change jamais
+    # l'abonnement : le webhook Stripe restera la source de vérité.
+    stripe_return = st.query_params.get("stripe", "")
+    if isinstance(stripe_return, list):
+        stripe_return = stripe_return[0] if stripe_return else ""
+    stripe_return = str(stripe_return or "").strip().lower()
+    if stripe_return in {"success", "cancel", "portal_return"}:
+        st.session_state["_nav_target"] = "⚙️ Paramètres du compte"
+        st.session_state["_stripe_flash"] = stripe_return
+        st.query_params.clear()
+        st.rerun()
 
 
     # ============================================================
@@ -2911,6 +2931,29 @@ Contrôles OmniCoord :
 
             st.subheader("💳 Mon abonnement")
             statut_compte = str(st.session_state.get("statut_abonnement", "ESSAI") or "ESSAI").upper()
+
+            stripe_flash = st.session_state.pop("_stripe_flash", None)
+            if stripe_flash == "success":
+                st.success(
+                    "✅ Retour de Stripe confirmé. Le paiement ne modifie pas encore l'abonnement directement : "
+                    "l'activation automatique sera sécurisée par le webhook Stripe à l'étape suivante."
+                )
+            elif stripe_flash == "cancel":
+                st.info("Paiement Stripe annulé : aucune modification n'a été appliquée à votre abonnement.")
+            elif stripe_flash == "portal_return":
+                st.info("Retour du portail Stripe.")
+
+            try:
+                billing_state = get_billing_state()
+            except BillingError:
+                logger.exception("Lecture de l'état Stripe impossible")
+                billing_state = {}
+
+            stripe_customer_id = str(billing_state.get("stripe_customer_id") or "").strip()
+            stripe_subscription_id = str(billing_state.get("stripe_subscription_id") or "").strip()
+            stripe_subscription_status = str(billing_state.get("stripe_subscription_status") or "").strip()
+            stripe_period_end = billing_state.get("stripe_current_period_end")
+
             if statut_compte == "PRO":
                 st.success("✅ Abonnement PRO actif — renouvellement mensuel")
                 st.caption("Aucune date de fin d'accès n'est appliquée tant que l'abonnement PRO reste actif.")
@@ -2922,8 +2965,102 @@ Contrôles OmniCoord :
                     st.info(f"🕒 ESSAI actif jusqu'au {date_fr(date_fin_compte, 'court')}")
                 else:
                     st.info("🕒 Abonnement ESSAI")
+
             st.write(f"**Quota IA :** {nb_req} / {quota_max}")
-            st.caption("La gestion du paiement, des factures et du renouvellement PRO sera reliée au portail Stripe.")
+            if stripe_subscription_status:
+                st.caption(f"Stripe : {stripe_subscription_status}")
+            if stripe_period_end:
+                stripe_period_dt = pd.to_datetime(stripe_period_end, errors="coerce")
+                if pd.notna(stripe_period_dt):
+                    st.caption(f"Prochaine échéance Stripe : {stripe_period_dt.strftime('%d/%m/%Y')}")
+
+            stripe_ready = stripe_is_configured()
+            if not stripe_ready:
+                st.warning(
+                    "Stripe n'est pas encore configuré sur ce déploiement. "
+                    "L'administrateur doit ajouter les secrets Stripe de test dans Streamlit."
+                )
+
+            if stripe_subscription_id and stripe_customer_id:
+                st.markdown("#### Gérer mon abonnement")
+                st.caption("Carte bancaire, factures et résiliation sont gérées sur le portail sécurisé Stripe.")
+                if st.button(
+                    "💳 Préparer l'accès au portail Stripe",
+                    key="stripe_open_portal",
+                    disabled=not stripe_ready,
+                    use_container_width=True,
+                ):
+                    try:
+                        st.session_state["_stripe_portal_url"] = create_portal_session()
+                    except (BillingConfigurationError, BillingError) as exc:
+                        st.error(str(exc))
+                    except Exception:
+                        logger.exception("Création du portail Stripe impossible")
+                        st.error("Impossible d'ouvrir le portail Stripe pour le moment.")
+
+                portal_url = st.session_state.pop("_stripe_portal_url", None)
+                if portal_url:
+                    st.link_button(
+                        "Continuer vers Stripe — abonnement et factures",
+                        portal_url,
+                        type="primary",
+                        use_container_width=True,
+                    )
+            else:
+                if statut_compte == "PRO":
+                    st.warning(
+                        "Ce compte PRO a été activé administrativement avant l'intégration Stripe. "
+                        "Il n'est pas encore relié à un abonnement Stripe."
+                    )
+
+                st.markdown("#### Choisir un abonnement")
+                col_plan_pro, col_plan_plus = st.columns(2)
+                with col_plan_pro:
+                    st.markdown("**PRO — 129 € HT / mois**")
+                    st.caption("1 structure · 500 requêtes IA / mois")
+                    if st.button(
+                        "Passer à PRO",
+                        key="stripe_checkout_pro",
+                        disabled=not stripe_ready,
+                        use_container_width=True,
+                    ):
+                        try:
+                            st.session_state["_stripe_checkout_url"] = create_checkout_session("PRO")
+                            st.session_state["_stripe_checkout_plan"] = "PRO"
+                        except (BillingConfigurationError, BillingError) as exc:
+                            st.error(str(exc))
+                        except Exception:
+                            logger.exception("Création Checkout PRO impossible")
+                            st.error("Impossible de préparer le paiement Stripe pour le moment.")
+
+                with col_plan_plus:
+                    st.markdown("**PRO PLUS — 279 € HT / mois**")
+                    st.caption("Multi-structures · gestion réseau en cours de déploiement")
+                    if st.button(
+                        "Passer à PRO PLUS",
+                        key="stripe_checkout_pro_plus",
+                        disabled=not stripe_ready,
+                        use_container_width=True,
+                    ):
+                        try:
+                            st.session_state["_stripe_checkout_url"] = create_checkout_session("PRO_PLUS")
+                            st.session_state["_stripe_checkout_plan"] = "PRO PLUS"
+                        except (BillingConfigurationError, BillingError) as exc:
+                            st.error(str(exc))
+                        except Exception:
+                            logger.exception("Création Checkout PRO PLUS impossible")
+                            st.error("Impossible de préparer le paiement Stripe pour le moment.")
+
+                checkout_url = st.session_state.pop("_stripe_checkout_url", None)
+                checkout_plan = st.session_state.pop("_stripe_checkout_plan", None)
+                if checkout_url:
+                    st.info(f"Paiement {checkout_plan or ''} préparé. Stripe s'ouvrira dans une page sécurisée.")
+                    st.link_button(
+                        "🔒 Continuer vers le paiement sécurisé Stripe",
+                        checkout_url,
+                        type="primary",
+                        use_container_width=True,
+                    )
 
             st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
             st.subheader("🔐 Sécurité du compte")
@@ -3251,7 +3388,7 @@ Contrôles OmniCoord :
                     email_client = st.text_input("Email du client *")
                 with col_c2:
                     duree_acces = st.number_input(
-                        "Durée d'essai (jours — ignorée pour PRO)", min_value=1, value=30
+                        "Durée d'essai (jours — ignorée pour PRO)", min_value=1, max_value=14, value=14
                     )
                     statut_abo = st.selectbox("Type d'abonnement", ["ESSAI", "PRO"])
                     st.caption(f"Quotas automatiques : ESSAI {TRIAL_AI_QUOTA} · PRO {PRO_AI_QUOTA} requêtes")
