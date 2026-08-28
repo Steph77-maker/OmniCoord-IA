@@ -54,6 +54,8 @@ logger = logging.getLogger("omnicoord.ui")
 
 
 INTERVENTION_STATUSES = ["Planifié", "Réalisé", "Absence", "Annulé", "Urgence à pourvoir"]
+TRIAL_AI_QUOTA = 20
+PRO_AI_QUOTA = 500
 
 
 def _intervention_status_color(status: str) -> str:
@@ -511,6 +513,19 @@ def render():
     st.sidebar.markdown("### ⚙️ Mon Compte")
     st.sidebar.caption(f"Connecté : {st.session_state.get('user_email', '')}")
     st.sidebar.caption(f"🏢 {st.session_state.get('structure_nom', 'Non assignée')}")
+
+    if not IS_ADMIN:
+        statut_abonnement = str(st.session_state.get("statut_abonnement", "ESSAI") or "ESSAI").upper()
+        if statut_abonnement == "PRO":
+            st.sidebar.success("💳 Abonnement PRO actif")
+        elif statut_abonnement == "SUSPENDU":
+            st.sidebar.error("⛔ Abonnement suspendu")
+        else:
+            date_fin = st.session_state.get("date_fin_essai")
+            if date_fin:
+                st.sidebar.info(f"🕒 Essai jusqu'au {date_fr(date_fin, 'court')}")
+            else:
+                st.sidebar.info("🕒 Abonnement ESSAI")
 
     peut_ia, nb_req, quota_max = peut_utiliser_ia()
     if quota_max >= 999999:
@@ -2807,6 +2822,23 @@ Contrôles OmniCoord :
             # -------------------------------------------------------
             st.caption(f"Structure : **{st.session_state.get('structure_nom', '—')}**")
 
+            st.subheader("💳 Mon abonnement")
+            statut_compte = str(st.session_state.get("statut_abonnement", "ESSAI") or "ESSAI").upper()
+            if statut_compte == "PRO":
+                st.success("✅ Abonnement PRO actif — renouvellement mensuel")
+                st.caption("Aucune date de fin d'accès n'est appliquée tant que l'abonnement PRO reste actif.")
+            elif statut_compte == "SUSPENDU":
+                st.error("⛔ Abonnement suspendu — contactez l'administrateur.")
+            else:
+                date_fin_compte = st.session_state.get("date_fin_essai")
+                if date_fin_compte:
+                    st.info(f"🕒 ESSAI actif jusqu'au {date_fr(date_fin_compte, 'court')}")
+                else:
+                    st.info("🕒 Abonnement ESSAI")
+            st.write(f"**Quota IA :** {nb_req} / {quota_max}")
+            st.caption("La gestion du paiement, des factures et du renouvellement PRO sera reliée au portail Stripe.")
+
+            st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
             st.subheader("🔐 Sécurité du compte")
             with st.form("form_mdp"):
                 n1 = st.text_input("Nouveau mot de passe", type="password")
@@ -2901,10 +2933,14 @@ Contrôles OmniCoord :
             nb_essai = 0
             if not df_clients.empty:
                 df_clients["date_fin_dt"] = pd.to_datetime(df_clients["date_fin_essai"], errors="coerce").dt.date
+                df_clients["statut_norm"] = df_clients["statut_abonnement"].fillna("ESSAI").astype(str).str.upper()
                 aujourdhui = datetime.date.today()
-                nb_actifs = len(df_clients[df_clients["date_fin_dt"] >= aujourdhui])
-                nb_expires = len(df_clients[df_clients["date_fin_dt"] < aujourdhui])
-                nb_essai = len(df_clients[df_clients["statut_abonnement"] == "ESSAI"])
+                essais_valides = (df_clients["statut_norm"] == "ESSAI") & (df_clients["date_fin_dt"] >= aujourdhui)
+                pros_actifs = df_clients["statut_norm"] == "PRO"
+                essais_expires = (df_clients["statut_norm"] == "ESSAI") & (df_clients["date_fin_dt"] < aujourdhui)
+                nb_actifs = int((essais_valides | pros_actifs).sum())
+                nb_expires = int(essais_expires.sum())
+                nb_essai = int(essais_valides.sum())
 
             col_c1.metric("👥 Total clients", nb_clients_total)
             col_c2.metric("✅ Actifs", nb_actifs)
@@ -2924,19 +2960,26 @@ Contrôles OmniCoord :
                 for _, client in df_clients.iterrows():
                     struct_nom = h(struct_noms.get(str(client.get("structure_id", "")), "Non assignée"))
                     email_c = h(client["email"])
-                    statut_c = client["statut_abonnement"]
+                    statut_c = str(client.get("statut_abonnement", "ESSAI") or "ESSAI").upper()
                     date_fin_c = client.get("date_fin_essai", "—")
 
-                    # Couleur selon statut
-                    if client.get("date_fin_dt") and client["date_fin_dt"] < datetime.date.today():
+                    # Le statut commercial prime sur l'ancienne date d'essai.
+                    if statut_c == "SUSPENDU":
                         couleur = "#e0554f"
-                        badge = "Expiré"
+                        badge = "Suspendu"
+                        acces_label = "⛔ Accès suspendu"
                     elif statut_c == "PRO":
                         couleur = "#3fae74"
                         badge = "PRO"
+                        acces_label = "💳 Abonnement PRO actif"
+                    elif client.get("date_fin_dt") and client["date_fin_dt"] < datetime.date.today():
+                        couleur = "#e0554f"
+                        badge = "Expiré"
+                        acces_label = f"📅 Essai expiré le {h(str(date_fin_c))}"
                     else:
                         couleur = "#d99a3d"
                         badge = "Essai"
+                        acces_label = f"📅 Essai jusqu'au {h(str(date_fin_c))}"
 
                     st.markdown(f"""
                         <div class="oc-card" style="border-left-color:{couleur};">
@@ -2945,8 +2988,8 @@ Contrôles OmniCoord :
                                 <span class="oc-badge" style="background:{couleur};">{badge}</span>
                             </div>
                             <div style="color:#b8c2cc; font-size:13px; margin-top:6px;">
-                                📧 {email_c} &nbsp;|&nbsp; 📅 Accès jusqu'au {h(str(date_fin_c))} &nbsp;|&nbsp;
-                                🤖 IA : {client.get('nb_requetes_ia', 0)}/{client.get('quota_max_ia', 20)}
+                                📧 {email_c} &nbsp;|&nbsp; {acces_label} &nbsp;|&nbsp;
+                                🤖 IA : {client.get('nb_requetes_ia', 0)}/{client.get('quota_max_ia', TRIAL_AI_QUOTA)}
                             </div>
                         </div>
                     """, unsafe_allow_html=True)
@@ -2955,24 +2998,52 @@ Contrôles OmniCoord :
                         col_g1, col_g2, col_g3 = st.columns(3)
 
                         with col_g1:
-                            # Prolonger l'accès
-                            jours_prolonger = st.number_input("Prolonger (jours)", min_value=1, value=30, key=f"prol_{client['id']}")
-                            if st.button("📅 Prolonger l'accès", key=f"btn_prol_{client['id']}"):
+                            # Une prolongation concerne uniquement une période d'essai.
+                            jours_prolonger = st.number_input(
+                                "Prolonger l'essai (jours)",
+                                min_value=1,
+                                value=30,
+                                key=f"prol_{client['id']}",
+                                disabled=(statut_c != "ESSAI"),
+                            )
+                            if st.button(
+                                "📅 Prolonger l'essai",
+                                key=f"btn_prol_{client['id']}",
+                                disabled=(statut_c != "ESSAI"),
+                            ):
                                 nouvelle_fin = (datetime.date.today() + datetime.timedelta(days=int(jours_prolonger))).isoformat()
                                 if sb_update("profils", {"date_fin_essai": nouvelle_fin}, "id", str(client["id"])):
                                     audit("PROLONGER_ACCES", "profils", str(client["id"]), {"nouvelle_fin": nouvelle_fin})
-                                    st.success(f"Accès prolongé jusqu'au {date_fr(nouvelle_fin, 'court')}")
+                                    st.success(f"Essai prolongé jusqu'au {date_fr(nouvelle_fin, 'court')}")
                                     st.rerun()
 
                         with col_g2:
-                            # Changer le statut d'abonnement
+                            # Changer le statut applique automatiquement le quota du forfait.
                             nv_statut = st.selectbox("Statut abonnement", ["ESSAI", "PRO", "SUSPENDU"],
                                                       index=["ESSAI", "PRO", "SUSPENDU"].index(statut_c) if statut_c in ["ESSAI", "PRO", "SUSPENDU"] else 0,
                                                       key=f"stat_{client['id']}")
                             if st.button("💳 Mettre à jour le statut", key=f"btn_stat_{client['id']}"):
-                                if sb_update("profils", {"statut_abonnement": nv_statut}, "id", str(client["id"])):
-                                    audit("UPDATE_ABONNEMENT", "profils", str(client["id"]), {"statut": nv_statut})
-                                    st.success(f"Statut mis à jour → {nv_statut}")
+                                update_abonnement = {"statut_abonnement": nv_statut}
+                                if nv_statut == "PRO" and statut_c != "PRO":
+                                    update_abonnement.update({"quota_max_ia": PRO_AI_QUOTA, "nb_requetes_ia": 0})
+                                elif nv_statut == "ESSAI" and statut_c != "ESSAI":
+                                    update_abonnement.update({"quota_max_ia": TRIAL_AI_QUOTA, "nb_requetes_ia": 0})
+                                    date_existante = client.get("date_fin_dt")
+                                    if not date_existante or date_existante < datetime.date.today():
+                                        update_abonnement["date_fin_essai"] = (datetime.date.today() + datetime.timedelta(days=30)).isoformat()
+                                if sb_update("profils", update_abonnement, "id", str(client["id"])):
+                                    audit(
+                                        "UPDATE_ABONNEMENT",
+                                        "profils",
+                                        str(client["id"]),
+                                        {"ancien_statut": statut_c, "statut": nv_statut, "quota": update_abonnement.get("quota_max_ia")},
+                                    )
+                                    if nv_statut == "PRO":
+                                        st.success(f"Statut mis à jour → PRO · quota {PRO_AI_QUOTA} requêtes")
+                                    elif nv_statut == "ESSAI":
+                                        st.success(f"Statut mis à jour → ESSAI · quota {TRIAL_AI_QUOTA} requêtes")
+                                    else:
+                                        st.success("Statut mis à jour → SUSPENDU")
                                     st.rerun()
 
                         with col_g3:
@@ -2994,6 +3065,12 @@ Contrôles OmniCoord :
 
                         # Envoyer un rappel de connexion sans jamais transmettre de mot de passe
                         if st.button("📧 Envoyer un rappel de connexion", key=f"remail_{client['id']}"):
+                            if statut_c == "PRO":
+                                rappel_statut = "💳 Votre abonnement PRO est actif.\n"
+                            elif statut_c == "SUSPENDU":
+                                rappel_statut = "⛔ Votre accès est actuellement suspendu.\n"
+                            else:
+                                rappel_statut = f"📅 Votre essai est valable jusqu'au : {date_fin_c}\n"
                             ok, msg = envoyer_email(
                                 client["email"],
                                 "OmniCoord IA — Rappel de connexion",
@@ -3001,7 +3078,7 @@ Contrôles OmniCoord :
                                 f"Votre accès OmniCoord IA est disponible ici :\n\n"
                                 f"🔗 Lien : {APP_URL}\n"
                                 f"📧 Email : {client['email']}\n"
-                                f"📅 Accès valable jusqu'au : {date_fin_c}\n\n"
+                                f"{rappel_statut}\n"
                                 f"Votre mot de passe reste personnel et n'est jamais communiqué par OmniCoord.\n\n"
                                 f"Cordialement,\nOmniCoord IA"
                             )
@@ -3033,6 +3110,9 @@ Contrôles OmniCoord :
         #  TAB 2 : INVITER UN CLIENT
         # ----------------------------------------------------------
         with tab_creer:
+            invitation_flash = st.session_state.pop("_admin_invitation_success", None)
+            if invitation_flash:
+                st.success(invitation_flash)
             st.subheader("✉️ Inviter un nouveau client")
             st.caption(
                 "Crée la structure et l'accès OmniCoord, puis envoie un lien d'activation sécurisé. "
@@ -3045,9 +3125,11 @@ Contrôles OmniCoord :
                     nom_structure = st.text_input("Nom de la structure (SAAD / SSIAD) *")
                     email_client = st.text_input("Email du client *")
                 with col_c2:
-                    duree_acces = st.number_input("Durée d'accès (jours)", min_value=1, value=30)
+                    duree_acces = st.number_input(
+                        "Durée d'essai (jours — ignorée pour PRO)", min_value=1, value=30
+                    )
                     statut_abo = st.selectbox("Type d'abonnement", ["ESSAI", "PRO"])
-                    quota_ia = st.number_input("Quota IA (nombre de requêtes)", min_value=1, value=20)
+                    st.caption(f"Quotas automatiques : ESSAI {TRIAL_AI_QUOTA} · PRO {PRO_AI_QUOTA} requêtes")
 
                 btn_creer = st.form_submit_button("✉️ Envoyer l'invitation")
 
@@ -3080,14 +3162,16 @@ Contrôles OmniCoord :
                         new_uid, token_hash = create_invited_auth_user(email_client_clean)
 
                         # 3. Créer le profil OmniCoord avant d'envoyer le lien.
+                        # La date reste renseignée comme historique technique mais n'expire jamais un compte PRO.
                         date_fin = (datetime.date.today() + datetime.timedelta(days=int(duree_acces))).isoformat()
+                        quota_initial = PRO_AI_QUOTA if statut_abo == "PRO" else TRIAL_AI_QUOTA
                         profile = sb_insert("profils", {
                             "id": new_uid,
                             "structure_id": struct_id,
                             "email": email_client_clean,
                             "est_admin": False,
                             "statut_abonnement": statut_abo,
-                            "quota_max_ia": int(quota_ia),
+                            "quota_max_ia": quota_initial,
                             "date_fin_essai": date_fin,
                         })
                         if not profile:
@@ -3096,6 +3180,13 @@ Contrôles OmniCoord :
 
                         # 4. Envoyer notre propre invitation via la messagerie OmniCoord.
                         invite_link = f"{APP_URL}?invite_token={urllib.parse.quote(token_hash)}&type=invite"
+                        if statut_abo == "PRO":
+                            invitation_statut = f"💳 Votre abonnement PRO est actif avec un quota de {PRO_AI_QUOTA} requêtes IA.\n"
+                        else:
+                            invitation_statut = (
+                                f"📅 Votre essai est valable jusqu'au {date_fr(date_fin, 'court')} "
+                                f"avec un quota de {TRIAL_AI_QUOTA} requêtes IA.\n"
+                            )
                         ok, msg = envoyer_email(
                             email_client_clean,
                             "Bienvenue sur OmniCoord IA — Activez votre compte",
@@ -3103,7 +3194,7 @@ Contrôles OmniCoord :
                             f"Votre accès à OmniCoord IA pour la structure « {nom_structure_clean} » est prêt.\n\n"
                             f"Pour activer votre compte et choisir vous-même votre mot de passe, utilisez ce lien :\n"
                             f"{invite_link}\n\n"
-                            f"📅 Votre accès est valable jusqu'au {date_fr(date_fin, 'court')}.\n\n"
+                            f"{invitation_statut}\n"
                             f"Pour votre sécurité, OmniCoord ne connaît pas et ne vous enverra jamais votre mot de passe.\n\n"
                             f"Cordialement,\n"
                             f"L'équipe OmniCoord IA"
@@ -3116,11 +3207,13 @@ Contrôles OmniCoord :
                             "email": email_client_clean,
                             "duree": int(duree_acces),
                             "statut": statut_abo,
+                            "quota": quota_initial,
                         })
-                        st.success(
-                            f"✅ Invitation envoyée à **{email_client_clean}** pour **{nom_structure_clean}**. "
+                        st.session_state["_admin_invitation_success"] = (
+                            f"✅ Invitation envoyée à {email_client_clean} pour {nom_structure_clean}. "
                             f"Le client choisira lui-même son mot de passe."
                         )
+                        st.rerun()
 
                     except Exception as exc:
                         logger.exception("Invitation client impossible")
