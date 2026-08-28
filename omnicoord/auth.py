@@ -35,6 +35,161 @@ def _load_authenticated_profile(user_id: str) -> tuple[dict | None, str]:
     return profile, structure_name
 
 
+
+def _set_authenticated_session(user, profil: dict, structure_nom: str, email: str | None = None) -> None:
+    """Initialise la session Streamlit après une authentification Supabase valide."""
+    user_email = (email or getattr(user, "email", "") or profil.get("email", "")).strip().lower()
+    st.session_state.update({
+        "password_correct": True,
+        "user_id": str(user.id),
+        "user_email": user_email,
+        "is_admin": bool(profil.get("est_admin", False)),
+        "structure_id": profil.get("structure_id"),
+        "structure_nom": structure_nom,
+        "statut_abonnement": profil.get("statut_abonnement", "ESSAI"),
+        "quota_max_ia": profil.get("quota_max_ia", 0),
+        "_auth_last_verified": time.monotonic(),
+        "mail_config": {
+            "email": profil.get("mail_smtp_email", ""),
+            "imap": profil.get("mail_imap_server", "imap.gmail.com"),
+        },
+    })
+
+
+def _profile_access_is_valid(profil: dict) -> bool:
+    """Bloque les comptes clients arrivés à échéance."""
+    date_fin_raw = profil.get("date_fin_essai")
+    if not date_fin_raw or profil.get("est_admin", False):
+        return True
+    date_fin = datetime.date.fromisoformat(str(date_fin_raw))
+    return datetime.date.today() <= date_fin
+
+
+def _query_param(name: str) -> str:
+    value = st.query_params.get(name, "")
+    if isinstance(value, list):
+        value = value[0] if value else ""
+    return str(value or "").strip()
+
+
+def _process_invitation_link() -> bool:
+    """Valide le token d'invitation transmis dans l'URL puis ouvre l'étape mot de passe."""
+    token_hash = _query_param("invite_token")
+    invite_type = _query_param("type") or "invite"
+    if not token_hash:
+        return False
+    if invite_type != "invite":
+        st.error("Lien d'invitation invalide.")
+        return False
+
+    st.markdown(
+        """
+        <div style="text-align:center; margin-top: 60px;">
+            <h1 style="color:#f2f5f8;">🩺 OmniCoord IA</h1>
+            <p style="color:#8996a3;">Activation de votre accès</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    _, col2, _ = st.columns([1, 1.2, 1])
+    with col2:
+        st.info("Vérification de votre invitation…")
+
+    try:
+        reset_user_client()
+        client = get_supabase()
+        res = client.auth.verify_otp({
+            "token_hash": token_hash,
+            "type": "invite",
+        })
+        user = res.user
+        session = res.session
+        if not user or not session:
+            raise RuntimeError("Session d'invitation absente")
+
+        st.session_state.update({
+            "_invite_verified": True,
+            "_invite_user_id": str(user.id),
+            "_invite_email": (getattr(user, "email", "") or "").strip().lower(),
+            "_invite_access_token": session.access_token,
+            "_invite_refresh_token": session.refresh_token,
+        })
+        # Le token est à usage unique : on le retire immédiatement de l'URL.
+        st.query_params.clear()
+        st.rerun()
+    except Exception:
+        logger.exception("Invitation verification error")
+        st.error("Cette invitation est invalide ou a expiré. Demandez une nouvelle invitation à l'administrateur.")
+    return False
+
+
+def _render_invitation_password_setup() -> bool:
+    """Permet à l'utilisateur invité de choisir lui-même son premier mot de passe."""
+    st.markdown(
+        """
+        <div style="text-align:center; margin-top: 60px;">
+            <h1 style="color:#f2f5f8;">🩺 OmniCoord IA</h1>
+            <p style="color:#8996a3;">Finalisez votre compte</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    _, col2, _ = st.columns([1, 1.2, 1])
+    with col2:
+        email = st.session_state.get("_invite_email", "")
+        if email:
+            st.success(f"Invitation validée pour {email}")
+        st.caption("Choisissez maintenant votre mot de passe. Il ne sera jamais communiqué à l'administrateur.")
+        with st.form("form_invite_password", clear_on_submit=False):
+            p1 = st.text_input("Créer mon mot de passe", type="password")
+            p2 = st.text_input("Confirmer le mot de passe", type="password")
+            submit = st.form_submit_button("Activer mon compte", use_container_width=True)
+
+        if not submit:
+            return False
+        if len(p1) < 8:
+            st.error("Le mot de passe doit contenir au moins 8 caractères.")
+            return False
+        if p1 != p2:
+            st.error("Les mots de passe ne correspondent pas.")
+            return False
+
+        try:
+            reset_user_client()
+            client = get_supabase()
+            client.auth.set_session(
+                st.session_state["_invite_access_token"],
+                st.session_state["_invite_refresh_token"],
+            )
+            updated = client.auth.update_user({"password": p1})
+            user = updated.user or client.auth.get_user().user
+            if not user:
+                raise RuntimeError("Utilisateur invité introuvable")
+
+            profil, structure_nom = _load_authenticated_profile(str(user.id))
+            if not profil:
+                client.auth.sign_out()
+                st.error("Votre accès existe mais son profil OmniCoord est introuvable. Contactez l'administrateur.")
+                return False
+            if not _profile_access_is_valid(profil):
+                client.auth.sign_out()
+                st.error("Votre période d'accès a expiré. Contactez l'administrateur.")
+                return False
+
+            _set_authenticated_session(user, profil, structure_nom, st.session_state.get("_invite_email"))
+            audit("ACCEPT_INVITATION", "profils", str(user.id))
+            for key in (
+                "_invite_verified", "_invite_user_id", "_invite_email",
+                "_invite_access_token", "_invite_refresh_token",
+            ):
+                st.session_state.pop(key, None)
+            st.success("✅ Compte activé. Bienvenue sur OmniCoord IA.")
+            st.rerun()
+        except Exception:
+            logger.exception("Invitation password setup error")
+            st.error("Impossible d'activer le compte pour le moment. Réessayez ou demandez une nouvelle invitation.")
+    return False
+
 def _mark_login_pending() -> None:
     """Callback du formulaire : marque la tentative avant le rerun Streamlit."""
     st.session_state["_login_pending"] = True
@@ -110,30 +265,13 @@ def _process_pending_login() -> bool:
             st.error("Profil introuvable. Contactez l'administrateur.")
             return False
 
-        date_fin_raw = profil.get("date_fin_essai")
-        if date_fin_raw and not profil.get("est_admin", False):
-            date_fin = datetime.date.fromisoformat(str(date_fin_raw))
-            if datetime.date.today() > date_fin:
-                client.auth.sign_out()
-                st.error("Votre période d'accès a expiré. Contactez l'administrateur.")
-                return False
+        if not _profile_access_is_valid(profil):
+            client.auth.sign_out()
+            st.error("Votre période d'accès a expiré. Contactez l'administrateur.")
+            return False
 
         enregistrer_tentative(email_saisi, True)
-        st.session_state.update({
-            "password_correct": True,
-            "user_id": str(user.id),
-            "user_email": email_saisi,
-            "is_admin": bool(profil.get("est_admin", False)),
-            "structure_id": profil.get("structure_id"),
-            "structure_nom": structure_nom,
-            "statut_abonnement": profil.get("statut_abonnement", "ESSAI"),
-            "quota_max_ia": profil.get("quota_max_ia", 0),
-            "_auth_last_verified": time.monotonic(),
-            "mail_config": {
-                "email": profil.get("mail_smtp_email", ""),
-                "imap": profil.get("mail_imap_server", "imap.gmail.com"),
-            },
-        })
+        _set_authenticated_session(user, profil, structure_nom, email_saisi)
         audit("LOGIN", "profils", str(user.id))
         st.session_state.pop("login_password", None)
         st.session_state.pop("_login_pending", None)
@@ -153,6 +291,12 @@ def _process_pending_login() -> bool:
 
 
 def check_password() -> bool:
+    # Une invitation commerciale est traitée avant le formulaire de connexion classique.
+    if _query_param("invite_token"):
+        return _process_invitation_link()
+    if st.session_state.get("_invite_verified", False):
+        return _render_invitation_password_setup()
+
     if st.session_state.get("password_correct", False):
         now = time.monotonic()
         last_verified = float(st.session_state.get("_auth_last_verified", 0.0) or 0.0)
