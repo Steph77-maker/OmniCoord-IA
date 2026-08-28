@@ -7,11 +7,12 @@ import hashlib
 import html
 import logging
 import math
+import re
 import urllib.parse
 import pandas as pd
 import streamlit as st
 from . import core
-from .matching_service import match_beneficiary
+from .matching_service import analyse_candidate_quick, match_beneficiary
 from .planning_service import ensure_no_intervenant_conflict, find_duplicate_interventions
 from .replacement_service import (
     NO_EXPIRY_DATE,
@@ -23,6 +24,7 @@ from .replacement_service import (
 from .exceptions import ValidationError, DatabaseError
 from .cv_service import analyse_cv
 from .compliance import CANONICAL_HABILITATIONS, canonical_key, canonicalize_habilitation, duplicate_habilitation_reason
+from .admin_service import create_invited_auth_user
 
 # Aliases conservés pour limiter les changements de comportement pendant la migration.
 sb = core.sb
@@ -162,6 +164,41 @@ def _time_minutes(value):
         except ValueError:
             continue
     return None
+
+
+def _parse_besoins_horaires(value):
+    """Extrait une plage horaire HH:MM-HH:MM depuis le texte existant si possible."""
+    text = str(value or "")
+    matches = re.findall(r"\b([01]?\d|2[0-3])\s*[hH:]\s*([0-5]\d)\b", text)
+    if len(matches) >= 2:
+        h1, m1 = map(int, matches[0])
+        h2, m2 = map(int, matches[1])
+        return datetime.time(h1, m1), datetime.time(h2, m2)
+
+    compact = re.findall(r"\b([01]?\d|2[0-3])\s*[hH]\b", text)
+    if len(compact) >= 2:
+        return datetime.time(int(compact[0]), 0), datetime.time(int(compact[1]), 0)
+
+    return datetime.time(8, 0), datetime.time(12, 0)
+
+
+def _besoin_horaire_label(start: datetime.time, end: datetime.time) -> str:
+    """Produit un libellé cohérent à partir des heures, sans saisie libre contradictoire."""
+    start_m = start.hour * 60 + start.minute
+    end_m = end.hour * 60 + end.minute
+
+    if end_m <= start_m:
+        raise ValueError("L'heure de fin doit être après l'heure de début.")
+
+    midpoint = (start_m + end_m) / 2
+    if midpoint < 12 * 60:
+        periode = "Matin"
+    elif midpoint < 18 * 60:
+        periode = "Après-midi"
+    else:
+        periode = "Soir"
+
+    return f"{periode} entre {start.strftime('%Hh%M')} et {end.strftime('%Hh%M')}."
 
 
 def _dashboard_latest_habilitations(df_habs):
@@ -505,54 +542,6 @@ def render():
         )
 
         if show_quick_admin:
-            with st.sidebar.expander("➕ Créer un accès"):
-                df_structs = sb_select("structures", order="nom")
-                with st.form("form_add_user"):
-                    struct_existante = st.selectbox(
-                        "Structure existante",
-                        [""] + (df_structs["nom"].tolist() if not df_structs.empty else [])
-                    )
-                    struct_nouvelle = st.text_input("OU nouvelle structure")
-                    p_email = st.text_input("Email utilisateur")
-                    p_pwd = st.text_input("Mot de passe temporaire")
-                    p_duree = st.number_input("Durée d'accès (jours)", min_value=1, value=30)
-                    btn_add = st.form_submit_button("Créer l'accès")
-
-                    if btn_add and p_email and p_pwd:
-                        if len(p_pwd) < 8:
-                            st.error("8 caractères minimum pour le mot de passe.")
-                        else:
-                            nom_struct = struct_nouvelle.strip() or struct_existante
-                            if not nom_struct:
-                                st.error("Choisissez ou créez une structure.")
-                            else:
-                                struct_row = sb_select("structures", {"nom": nom_struct})
-                                if struct_row.empty:
-                                    struct_row = sb_insert("structures", {"nom": nom_struct})
-                                    struct_id = struct_row["id"] if struct_row else None
-                                else:
-                                    struct_id = struct_row.iloc[0]["id"]
-
-                                if struct_id:
-                                    date_fin = (datetime.date.today() + datetime.timedelta(days=int(p_duree))).isoformat()
-                                    try:
-                                        auth_res = create_auth_user(p_email, p_pwd)
-                                        new_uid = auth_res.user.id
-                                        sb_insert("profils", {
-                                            "id": new_uid,
-                                            "structure_id": struct_id,
-                                            "email": p_email,
-                                            "est_admin": False,
-                                            "statut_abonnement": "ESSAI",
-                                            "quota_max_ia": 20,
-                                            "date_fin_essai": date_fin
-                                        })
-                                        audit("CREATE_USER", "profils", new_uid, {"structure": nom_struct})
-                                        st.success(f"✅ Accès créé pour {p_email} jusqu'au {date_fr(date_fin, 'court')}")
-                                    except Exception:
-                                        logger.exception("Création d'accès utilisateur impossible")
-                                        st.error("Impossible de créer l'accès. Consultez les journaux administrateur si le problème persiste.")
-
             with st.sidebar.expander("📊 Quotas IA"):
                 df_users = sb_select("profils", order="email")
                 if not df_users.empty:
@@ -582,7 +571,7 @@ def render():
         "📅 Plannings & Urgences",
         "✅ Conformité & Habilitations",
         "📊 Suivi des heures",
-        "👤 Mon Profil",
+        "⚙️ Paramètres du compte",
     ]
     if IS_ADMIN:
         _onglets.insert(0, "🛠️ Administration")
@@ -820,7 +809,7 @@ Contrôles OmniCoord :
                             if hab_i.empty:
                                 st.info("Aucune habilitation enregistrée pour cet intervenant. Vous pouvez en ajouter une maintenant ou plus tard.")
                             else:
-                                st.caption("Historique des habilitations. Un renouvellement crée une nouvelle ligne afin de conserver la trace de l'ancienne.")
+                                st.caption("Habilitations enregistrées. Une modification met à jour la ligne existante ; une nouvelle ligne n'est créée que pour un nouveau type d'habilitation.")
                                 hab_i["_date_exp"] = pd.to_datetime(hab_i["date_expiration"], errors="coerce").dt.date
                                 hab_i = hab_i.sort_values(["type_habilitation", "date_obtention"], ascending=[True, False])
                                 for _, hb in hab_i.iterrows():
@@ -864,7 +853,7 @@ Contrôles OmniCoord :
                                             key=f"confirm_remove_h_{hb['id']}",
                                             help=(
                                                 "À utiliser pour corriger une saisie erronée ou un doublon. "
-                                                "Un renouvellement normal doit rester dans l'historique."
+                                                "Une habilitation existante doit être modifiée plutôt que recréée."
                                             ),
                                         )
                                         if st.button(
@@ -887,36 +876,111 @@ Contrôles OmniCoord :
                                                 st.success("Habilitation retirée de la fiche.")
                                                 st.rerun()
 
-                            st.markdown("#### ➕ Ajouter / renouveler une habilitation")
-                            mode_key = f"new_hab_mode_{row['id']}"
-                            mode_h = st.radio("Validité", ["Avec date d'expiration", "Valide sans date d'expiration"], horizontal=True, key=mode_key)
+                            st.markdown("#### 🛠️ Modifier ou ajouter une habilitation")
+
+                            if not hab_i.empty:
+                                hab_edit = hab_i.copy()
+                                hab_edit["_type_canonique"] = hab_edit["type_habilitation"].astype(str).map(canonicalize_habilitation)
+                                hab_edit["_exp_dt"] = pd.to_datetime(hab_edit["date_expiration"], errors="coerce").dt.date
+                                hab_edit["_obt_dt"] = pd.to_datetime(hab_edit["date_obtention"], errors="coerce").dt.date
+                                hab_edit = hab_edit.sort_values(["_type_canonique", "_obt_dt"], ascending=[True, False])
+
+                                edit_labels = {}
+                                for _, existing in hab_edit.iterrows():
+                                    exp_value = existing.get("_exp_dt")
+                                    exp_label = "sans expiration" if pd.isna(exp_value) or exp_value == NO_EXPIRY_DATE else exp_value.strftime("%d/%m/%Y")
+                                    label = f"{existing['_type_canonique']} · expire {exp_label}"
+                                    edit_labels[f"{label} · {str(existing['id'])[:8]}"] = str(existing["id"])
+
+                                edit_choice = st.selectbox(
+                                    "Habilitation à modifier",
+                                    list(edit_labels.keys()),
+                                    key=f"edit_hab_choice_{row['id']}",
+                                )
+                                edit_id = edit_labels[edit_choice]
+                                edit_row = hab_edit[hab_edit["id"].astype(str) == edit_id].iloc[0]
+                                edit_type = edit_row["_type_canonique"]
+                                edit_obt = edit_row.get("_obt_dt")
+                                edit_obt = edit_obt if pd.notna(edit_obt) else datetime.date.today()
+                                edit_exp = edit_row.get("_exp_dt")
+                                edit_sans_exp = pd.isna(edit_exp) or edit_exp == NO_EXPIRY_DATE
+                                edit_exp_default = datetime.date.today() + datetime.timedelta(days=365) if edit_sans_exp else edit_exp
+
+                                with st.form(f"update_hab_interv_{edit_id}", clear_on_submit=False):
+                                    st.text_input("Type d'habilitation", value=edit_type, disabled=True)
+                                    u_obt = st.date_input("Date d'obtention", value=edit_obt, key=f"update_hab_obt_{edit_id}")
+                                    u_sans_exp = st.checkbox(
+                                        "Valide sans date d'expiration",
+                                        value=edit_sans_exp,
+                                        key=f"update_hab_sans_exp_{edit_id}",
+                                    )
+                                    u_exp = st.date_input(
+                                        "Date d'expiration",
+                                        value=edit_exp_default,
+                                        key=f"update_hab_exp_{edit_id}",
+                                        help="Cette date est ignorée si « Valide sans date d'expiration » est cochée.",
+                                    )
+                                    update_h = st.form_submit_button("💾 Enregistrer la modification")
+
+                                if update_h:
+                                    if not u_sans_exp and u_exp <= u_obt:
+                                        st.error("La date d'expiration doit être après la date d'obtention.")
+                                    else:
+                                        payload_h = {
+                                            "type_habilitation": edit_type,
+                                            "date_obtention": u_obt.isoformat(),
+                                            "date_expiration": NO_EXPIRY_DATE.isoformat() if u_sans_exp else u_exp.isoformat(),
+                                        }
+                                        if sb_update("habilitations", payload_h, "id", edit_id):
+                                            audit(
+                                                "UPDATE_HABILITATION",
+                                                "habilitations",
+                                                edit_id,
+                                                {"intervenant_id": str(row["id"]), "type_canonique": edit_type, "motif": "modification"},
+                                            )
+                                            st.success("Habilitation mise à jour.")
+                                            st.rerun()
+
+                            st.markdown("##### ➕ Ajouter un nouveau type d'habilitation")
                             with st.form(f"add_hab_interv_{row['id']}", clear_on_submit=True):
-                                n_type = st.selectbox("Type d'habilitation", hab_types, key=f"nt_{row['id']}")
-                                n_obt = st.date_input("Date d'obtention", value=datetime.date.today(), key=f"no_{row['id']}")
-                                n_exp = None
-                                if mode_h == "Avec date d'expiration":
-                                    n_exp = st.date_input("Date d'expiration", value=datetime.date.today() + datetime.timedelta(days=365), key=f"ne_{row['id']}")
+                                n_type = st.selectbox("Nouveau type d'habilitation", hab_types, key=f"new_hab_type_{row['id']}")
+                                n_obt = st.date_input("Date d'obtention", value=datetime.date.today(), key=f"new_hab_obt_{row['id']}")
+                                n_sans_exp = st.checkbox("Valide sans date d'expiration", value=False, key=f"new_hab_sans_exp_{row['id']}")
+                                n_exp = st.date_input(
+                                    "Date d'expiration",
+                                    value=datetime.date.today() + datetime.timedelta(days=365),
+                                    key=f"new_hab_exp_{row['id']}",
+                                    help="Cette date est ignorée si « Valide sans date d'expiration » est cochée.",
+                                )
                                 add_h = st.form_submit_button("➕ Ajouter à la fiche")
+
                             if add_h:
-                                if n_exp is not None and n_exp <= n_obt:
+                                canon_type = canonicalize_habilitation(n_type)
+                                same_type = hab_i[
+                                    hab_i["type_habilitation"].astype(str).map(canonicalize_habilitation) == canon_type
+                                ].copy() if not hab_i.empty and "type_habilitation" in hab_i.columns else pd.DataFrame()
+
+                                if not same_type.empty:
+                                    st.warning("Cette habilitation existe déjà. Utilisez « Habilitation à modifier » juste au-dessus.")
+                                elif not n_sans_exp and n_exp <= n_obt:
                                     st.error("La date d'expiration doit être après la date d'obtention.")
                                 else:
-                                    existing_records = hab_i.to_dict("records") if not hab_i.empty else []
-                                    duplicate_reason = duplicate_habilitation_reason(
-                                        existing_records, n_type, n_obt, permanent=n_exp is None
-                                    )
-                                    if duplicate_reason:
-                                        st.warning(duplicate_reason)
-                                    else:
-                                        new_h = sb_insert("habilitations", {
-                                            "structure_id": SID, "intervenant_id": str(row["id"]),
-                                            "type_habilitation": canonicalize_habilitation(n_type), "date_obtention": n_obt.isoformat(),
-                                            "date_expiration": n_exp.isoformat() if n_exp is not None else NO_EXPIRY_DATE.isoformat(),
-                                        })
-                                        if new_h:
-                                            audit("CREATE_HABILITATION", "habilitations", new_h.get("id"), {"intervenant_id": str(row["id"]), "type_canonique": canonicalize_habilitation(n_type)})
-                                            st.success("Habilitation ajoutée à la fiche. Le moteur de matching la prendra en compte automatiquement.")
-                                            st.rerun()
+                                    new_h = sb_insert("habilitations", {
+                                        "structure_id": SID,
+                                        "intervenant_id": str(row["id"]),
+                                        "type_habilitation": canon_type,
+                                        "date_obtention": n_obt.isoformat(),
+                                        "date_expiration": NO_EXPIRY_DATE.isoformat() if n_sans_exp else n_exp.isoformat(),
+                                    })
+                                    if new_h:
+                                        audit(
+                                            "CREATE_HABILITATION",
+                                            "habilitations",
+                                            new_h.get("id"),
+                                            {"intervenant_id": str(row["id"]), "type_canonique": canon_type},
+                                        )
+                                        st.success("Habilitation ajoutée à la fiche.")
+                                        st.rerun()
 
         with tab_ajout:
             with st.form("form_ajout_interv", clear_on_submit=True):
@@ -1084,6 +1148,10 @@ Contrôles OmniCoord :
             benef_id = benef_labels[benef_choisi_label]
             benef_row = df_benef[df_benef["id"] == benef_id].iloc[0]
 
+            pending_assign = st.session_state.get("matching_assign_pending") or {}
+            if pending_assign and str(pending_assign.get("beneficiary_id", "")) != str(benef_id):
+                st.session_state.pop("matching_assign_pending", None)
+
             st.markdown(f"""
                 <div class="oc-card">
                     <b>Besoins récurrents :</b> {h(benef_row.get('besoins_recurrents', '') or 'Non renseigné')}<br>
@@ -1093,27 +1161,28 @@ Contrôles OmniCoord :
                 </div>
             """, unsafe_allow_html=True)
 
-            if st.button("🎯 Lancer le matching IA"):
+            if st.button("🎯 Lancer le matching"):
                 try:
-                    # Un nouveau matching ne doit jamais réutiliser des états IA
-                    # ou des résultats issus de l'exécution précédente.
+                    # Le premier résultat doit être immédiat : préfiltrage + score métier
+                    # uniquement. L'analyse Gemini est déclenchée séparément et reste
+                    # facultative.
                     st.session_state.pop("resultats_matching", None)
                     st.session_state.pop("benef_matching_label", None)
                     st.session_state.pop("_ai_error_shown", None)
-                    with st.spinner("Préfiltrage, scoring puis analyse IA des meilleurs candidats..."):
+                    st.session_state.pop("matching_ai_enriched", None)
+                    for _key in list(st.session_state.keys()):
+                        if str(_key).startswith(f"matching_quick_{benef_id}_"):
+                            st.session_state.pop(_key, None)
+                    with st.spinner("Préfiltrage et classement métier des candidats..."):
                         resultats = match_beneficiary(
                             SID,
                             benef_row.to_dict(),
                             df_interv_dispo,
-                            ai_top_k=5,
+                            ai_top_k=0,
                         )
                     st.session_state["resultats_matching"] = resultats
                     st.session_state["benef_matching_label"] = benef_choisi_label
-                    if len(df_interv_dispo) > 5:
-                        st.caption(
-                            f"⚡ {len(df_interv_dispo)} candidats préclassés en Python ; "
-                            "l'IA peut analyser jusqu'aux 5 meilleurs pour limiter coût et latence."
-                        )
+                    st.session_state["matching_ai_enriched"] = False
                 except DatabaseError:
                     st.error("Impossible de charger les données nécessaires au matching.")
 
@@ -1123,11 +1192,10 @@ Contrôles OmniCoord :
             if matching_results and same_beneficiary:
                 st.markdown("### 📊 Résultats du matching")
 
-                ai_count = sum(1 for r in matching_results if r.get("ai_used"))
-                if ai_count:
-                    st.success(f"✨ Analyse IA effectuée sur {ai_count} profil(s). Le score final reste calculé par OmniCoord.")
-                else:
-                    st.info("🧮 Classement métier uniquement : aucune note IA n'est affichée ni simulée.")
+                st.info(
+                    "⚡ Classement métier disponible immédiatement. "
+                    "Vous pouvez affecter un intervenant tout de suite ou demander une analyse IA rapide sur le ou les candidats de votre choix."
+                )
 
                 OBJECTIVE_DIMENSIONS = [
                     ("score_competences",  "🛠️ Compétences techniques", "#2f7cf6"),
@@ -1167,6 +1235,136 @@ Contrôles OmniCoord :
                             </div>
                         </div>
                     """, unsafe_allow_html=True)
+
+                    # Analyse IA rapide à la demande, candidat par candidat.
+                    intervenant_id_match = str(res.get("intervenant_id", "") or "")
+                    quick_key = f"matching_quick_{benef_id}_{intervenant_id_match}"
+                    quick_result = st.session_state.get(quick_key)
+
+                    if st.button(
+                        "✨ Analyse IA rapide",
+                        key=f"quick_ai_btn_{benef_id}_{intervenant_id_match}",
+                    ):
+                        st.session_state.pop("_ai_error_shown", None)
+                        with st.spinner(f"Analyse rapide de {res.get('intervenant_nom', '')}..."):
+                            quick_result = analyse_candidate_quick(
+                                benef_row.to_dict(),
+                                res,
+                            )
+                        if quick_result:
+                            st.session_state[quick_key] = quick_result
+                        else:
+                            st.session_state.pop(quick_key, None)
+                        st.rerun()
+
+                    quick_result = st.session_state.get(quick_key)
+                    if quick_result:
+                        synthese = str(quick_result.get("synthese", "") or "").strip()
+                        vigilance = str(quick_result.get("vigilance", "") or "").strip()
+                        if synthese:
+                            st.info(f"✨ {synthese}")
+                        if vigilance:
+                            st.warning(f"⚠️ {vigilance}")
+
+                    # Affectation directe du référent depuis le matching.
+                    # Le matching propose ; la décision reste explicitement humaine.
+                    current_attitre_id = str(benef_row.get("intervenant_attitré_id", "") or "")
+                    pending_assign = st.session_state.get("matching_assign_pending") or {}
+
+                    if intervenant_id_match and current_attitre_id == intervenant_id_match:
+                        st.success(f"✅ {res.get('intervenant_nom', '')} est déjà l'intervenant attitré de {benef_choisi_label}.")
+                    else:
+                        if st.button(
+                            "👤 Affecter comme intervenant attitré",
+                            key=f"assign_ref_{benef_id}_{intervenant_id_match}",
+                        ):
+                            st.session_state["matching_assign_pending"] = {
+                                "beneficiary_id": str(benef_id),
+                                "beneficiary_label": benef_choisi_label,
+                                "intervenant_id": intervenant_id_match,
+                                "intervenant_nom": str(res.get("intervenant_nom", "") or ""),
+                            }
+                            st.rerun()
+
+                        pending_assign = st.session_state.get("matching_assign_pending") or {}
+                        if (
+                            str(pending_assign.get("beneficiary_id", "")) == str(benef_id)
+                            and str(pending_assign.get("intervenant_id", "")) == intervenant_id_match
+                        ):
+                            st.warning(
+                                f"Confirmer l'affectation de {pending_assign.get('intervenant_nom', '')} "
+                                f"comme intervenant attitré de {benef_choisi_label} ?"
+                            )
+                            c_confirm_ref, c_cancel_ref = st.columns(2)
+
+                            if c_confirm_ref.button(
+                                "✅ Confirmer l'affectation",
+                                key=f"confirm_ref_{benef_id}_{intervenant_id_match}",
+                                type="primary",
+                            ):
+                                # Relecture juste avant l'écriture : évite d'affecter
+                                # une fiche archivée ou un intervenant devenu indisponible.
+                                benef_check = sb_select(
+                                    "beneficiaires",
+                                    {"structure_id": SID, "id": str(benef_id)},
+                                )
+                                interv_check = sb_select(
+                                    "intervenants",
+                                    {"structure_id": SID, "id": intervenant_id_match},
+                                )
+
+                                if benef_check.empty:
+                                    st.error("Le bénéficiaire n'est plus disponible. Rechargez le matching.")
+                                elif (
+                                    "deleted_at" in benef_check.columns
+                                    and benef_check.iloc[0].get("deleted_at") is not None
+                                    and not pd.isna(benef_check.iloc[0].get("deleted_at"))
+                                ):
+                                    st.error("Ce bénéficiaire est archivé et ne peut plus recevoir d'intervenant attitré.")
+                                elif interv_check.empty:
+                                    st.error("L'intervenant n'est plus disponible. Rechargez le matching.")
+                                else:
+                                    interv_now = interv_check.iloc[0]
+                                    interv_archived = (
+                                        "deleted_at" in interv_check.columns
+                                        and interv_now.get("deleted_at") is not None
+                                        and not pd.isna(interv_now.get("deleted_at"))
+                                    )
+                                    if interv_archived:
+                                        st.error("Cet intervenant est archivé et ne peut pas être affecté.")
+                                    elif str(interv_now.get("statut_dispo", "") or "") == "Indisponible":
+                                        st.error("Cet intervenant est désormais indisponible. Relancez le matching.")
+                                    elif sb_update(
+                                        "beneficiaires",
+                                        {"intervenant_attitré_id": intervenant_id_match},
+                                        "id",
+                                        str(benef_id),
+                                    ):
+                                        audit(
+                                            "ASSIGN_REFERENT_FROM_MATCHING",
+                                            "beneficiaires",
+                                            str(benef_id),
+                                            {
+                                                "intervenant_id": intervenant_id_match,
+                                                "intervenant_nom": str(res.get("intervenant_nom", "") or ""),
+                                                "score_matching": score,
+                                            },
+                                        )
+                                        st.session_state.pop("matching_assign_pending", None)
+                                        st.session_state.pop("dashboard_ai_summary", None)
+                                        st.session_state.pop("dashboard_ai_fingerprint", None)
+                                        st.success(
+                                            f"✅ {res.get('intervenant_nom', '')} est maintenant "
+                                            f"l'intervenant attitré de {benef_choisi_label}."
+                                        )
+                                        st.rerun()
+
+                            if c_cancel_ref.button(
+                                "Annuler",
+                                key=f"cancel_ref_{benef_id}_{intervenant_id_match}",
+                            ):
+                                st.session_state.pop("matching_assign_pending", None)
+                                st.rerun()
 
                     # Alertes
                     if res.get("alerte_habilitation"):
@@ -1380,7 +1578,12 @@ Contrôles OmniCoord :
                                     eb_ctel = st.text_input("Tél. contact d'urgence", value=str(row.get("contact_urgence_tel") or ""), key=f"bct_{row['id']}")
                                     eb_besoins = st.text_area("Besoins récurrents", value=str(row.get("besoins_recurrents") or ""), key=f"bb_{row['id']}")
                                     eb_gestes = st.text_area("Gestes techniques requis", value=str(row.get("gestes_techniques") or ""), key=f"bgest_{row['id']}")
-                                    eb_horaires = st.text_input("Besoins horaires", value=str(row.get("besoins_horaires") or ""), key=f"bh_{row['id']}")
+                                    bh_debut0, bh_fin0 = _parse_besoins_horaires(row.get("besoins_horaires"))
+                                    bhc1, bhc2 = st.columns(2)
+                                    with bhc1:
+                                        eb_horaire_debut = st.time_input("Début du besoin", value=bh_debut0, key=f"bh_debut_{row['id']}")
+                                    with bhc2:
+                                        eb_horaire_fin = st.time_input("Fin du besoin", value=bh_fin0, key=f"bh_fin_{row['id']}")
                                     eb_notes = st.text_area("Notes", value=str(row.get("notes") or ""), key=f"bnotes_{row['id']}")
                                 opts_i = {"Non défini": None}
                                 opts_i.update({v: k for k, v in interv_map.items()})
@@ -1392,65 +1595,198 @@ Contrôles OmniCoord :
                                 if not eb_nom.strip() or not eb_prenom.strip():
                                     st.error("Le nom et le prénom sont obligatoires.")
                                 else:
-                                    p_b = {"nom": eb_nom.strip(), "prenom": eb_prenom.strip(), "adresse": eb_adresse.strip(), "telephone": eb_tel.strip(), "niveau_dependance": eb_gir, "statut": eb_statut, "contact_urgence_nom": eb_cnom.strip(), "contact_urgence_tel": eb_ctel.strip(), "besoins_recurrents": eb_besoins.strip(), "gestes_techniques": eb_gestes.strip(), "besoins_horaires": eb_horaires.strip(), "notes": eb_notes.strip(), "intervenant_attitré_id": opts_i[eb_att]}
-                                    if sb_update("beneficiaires", p_b, "id", row["id"]):
-                                        audit("UPDATE_BENEFICIAIRE", "beneficiaires", str(row["id"]), {"champs": list(p_b.keys())})
-                                        st.success("Fiche bénéficiaire mise à jour.")
-                                        st.rerun()
+                                    try:
+                                        besoins_horaires_calcule = _besoin_horaire_label(eb_horaire_debut, eb_horaire_fin)
+                                    except ValueError as exc:
+                                        st.error(str(exc))
+                                    else:
+                                        p_b = {"nom": eb_nom.strip(), "prenom": eb_prenom.strip(), "adresse": eb_adresse.strip(), "telephone": eb_tel.strip(), "niveau_dependance": eb_gir, "statut": eb_statut, "contact_urgence_nom": eb_cnom.strip(), "contact_urgence_tel": eb_ctel.strip(), "besoins_recurrents": eb_besoins.strip(), "gestes_techniques": eb_gestes.strip(), "besoins_horaires": besoins_horaires_calcule, "notes": eb_notes.strip(), "intervenant_attitré_id": opts_i[eb_att]}
+                                        if sb_update("beneficiaires", p_b, "id", row["id"]):
+                                            audit("UPDATE_BENEFICIAIRE", "beneficiaires", str(row["id"]), {"champs": list(p_b.keys())})
+                                            st.success("Fiche bénéficiaire mise à jour.")
+                                            st.rerun()
 
                             st.markdown("---")
-                            confirm_b = st.checkbox("Confirmer l'archivage", key=f"confirm_del_b_{row['id']}", help="La fiche est retirée des listes actives mais l'historique est conservé.")
-                            if st.button("🗑️ Archiver / retirer", key=f"del_b_{row['id']}", disabled=not confirm_b):
-                                if sb_update("beneficiaires", {"deleted_at": datetime.datetime.utcnow().isoformat(), "statut": "Inactif"}, "id", row["id"]):
+                            st.markdown("#### Archivage")
+                            confirm_b = st.checkbox(
+                                "Confirmer l'archivage",
+                                key=f"confirm_del_b_{row['id']}",
+                                help="La fiche est retirée des listes actives mais l'historique est conservé.",
+                            )
+                            if st.button("🗃️ Archiver / retirer", key=f"del_b_{row['id']}", disabled=not confirm_b):
+                                if sb_update(
+                                    "beneficiaires",
+                                    {"deleted_at": datetime.datetime.utcnow().isoformat(), "statut": "Inactif"},
+                                    "id",
+                                    row["id"],
+                                ):
                                     audit("ARCHIVE_BENEFICIAIRE", "beneficiaires", str(row["id"]))
                                     st.success("Bénéficiaire archivé et retiré des listes actives.")
                                     st.rerun()
 
+                            st.markdown("#### ⚠️ Suppression définitive")
+                            st.caption(
+                                "À réserver aux fiches créées par erreur ou aux données de test. "
+                                "Pour un bénéficiaire ayant un historique, utilisez l'archivage afin de préserver les interventions et documents."
+                            )
+                            confirm_delete_b = st.checkbox(
+                                "Je souhaite supprimer définitivement cette fiche",
+                                key=f"confirm_hard_delete_b_{row['id']}",
+                            )
+
+                            if confirm_delete_b:
+                                # Vérification avant toute suppression : on ne supprime pas une
+                                # fiche qui possède déjà un historique métier.
+                                linked_interventions = sb_select(
+                                    "interventions",
+                                    {"structure_id": SID, "beneficiaire_id": str(row["id"])},
+                                )
+                                linked_documents = sb_select(
+                                    "documents_transmissions",
+                                    {"structure_id": SID, "beneficiaire_id": str(row["id"])},
+                                )
+                                nb_interventions = 0 if linked_interventions.empty else len(linked_interventions)
+                                nb_documents = 0 if linked_documents.empty else len(linked_documents)
+                                has_history = nb_interventions > 0 or nb_documents > 0
+
+                                if has_history:
+                                    st.warning(
+                                        f"Suppression définitive bloquée : cette fiche possède "
+                                        f"{nb_interventions} intervention(s) et {nb_documents} document(s). "
+                                        "Archivez-la pour conserver l'historique."
+                                    )
+                                else:
+                                    delete_phrase = st.text_input(
+                                        'Pour confirmer, tapez exactement SUPPRIMER',
+                                        key=f"hard_delete_phrase_b_{row['id']}",
+                                    )
+                                    hard_delete_ok = delete_phrase.strip() == "SUPPRIMER"
+                                    if st.button(
+                                        "🗑️ Supprimer définitivement",
+                                        key=f"hard_delete_b_{row['id']}",
+                                        disabled=not hard_delete_ok,
+                                        type="primary",
+                                    ):
+                                        if sb_delete("beneficiaires", "id", str(row["id"])):
+                                            audit(
+                                                "DELETE_BENEFICIAIRE",
+                                                "beneficiaires",
+                                                str(row["id"]),
+                                                {"motif": "suppression_definitive_sans_historique"},
+                                            )
+                                            st.success("Bénéficiaire supprimé définitivement.")
+                                            st.rerun()
+                                        else:
+                                            st.error(
+                                                "La suppression définitive a été refusée par la base. "
+                                                "Aucune donnée liée n'a été supprimée."
+                                            )
+
         with tab_ajout_b:
-            with st.form("form_add_benef", clear_on_submit=True):
+            # Important : ce bloc n'utilise volontairement PAS st.form().
+            # Dans un formulaire Streamlit, la touche Entrée d'un time_input peut
+            # déclencher la soumission avant que l'utilisateur ait fini la fiche.
+            # Ici, seule l'action explicite sur le bouton "Ajouter" crée le bénéficiaire.
+            add_b_keys = [
+                "new_b_nom", "new_b_prenom", "new_b_adresse", "new_b_telephone",
+                "new_b_gir", "new_b_contact_nom", "new_b_contact_tel",
+                "new_b_besoins", "new_b_gestes", "new_bh_debut", "new_bh_fin",
+                "new_b_notes", "new_b_attitre",
+            ]
+            if st.session_state.pop("reset_add_beneficiaire", False):
+                for key in add_b_keys:
+                    st.session_state.pop(key, None)
+
+            with st.container(border=True):
                 c1, c2 = st.columns(2)
                 with c1:
-                    nom_b = st.text_input("Nom *")
-                    prenom_b = st.text_input("Prénom *")
-                    adresse_b = st.text_input("Adresse")
-                    telephone_b = st.text_input("Téléphone")
-                    niveau_dep = st.selectbox("GIR", ["GIR 1","GIR 2","GIR 3","GIR 4","GIR 5","GIR 6","Non évalué"])
+                    nom_b = st.text_input("Nom *", key="new_b_nom")
+                    prenom_b = st.text_input("Prénom *", key="new_b_prenom")
+                    adresse_b = st.text_input("Adresse", key="new_b_adresse")
+                    telephone_b = st.text_input("Téléphone", key="new_b_telephone")
+                    niveau_dep = st.selectbox(
+                        "GIR",
+                        ["GIR 1","GIR 2","GIR 3","GIR 4","GIR 5","GIR 6","Non évalué"],
+                        key="new_b_gir",
+                    )
                 with c2:
-                    contact_urgence_nom_b = st.text_input("Contact d'urgence (nom + lien)")
-                    contact_urgence_tel_b = st.text_input("Tél. contact d'urgence")
-                    besoins_rec = st.text_area("Besoins récurrents")
-                    gestes_b = st.text_area("Gestes techniques requis")
-                    horaires_b = st.text_input("Besoins horaires")
-                    notes_b = st.text_area("Notes")
+                    contact_urgence_nom_b = st.text_input(
+                        "Contact d'urgence (nom + lien)",
+                        key="new_b_contact_nom",
+                    )
+                    contact_urgence_tel_b = st.text_input(
+                        "Tél. contact d'urgence",
+                        key="new_b_contact_tel",
+                    )
+                    besoins_rec = st.text_area("Besoins récurrents", key="new_b_besoins")
+                    gestes_b = st.text_area("Gestes techniques requis", key="new_b_gestes")
+                    bh_new_c1, bh_new_c2 = st.columns(2)
+                    with bh_new_c1:
+                        horaires_debut_b = st.time_input(
+                            "Début du besoin",
+                            value=datetime.time(8, 0),
+                            key="new_bh_debut",
+                        )
+                    with bh_new_c2:
+                        horaires_fin_b = st.time_input(
+                            "Fin du besoin",
+                            value=datetime.time(12, 0),
+                            key="new_bh_fin",
+                        )
+                    notes_b = st.text_area("Notes", key="new_b_notes")
 
                 opts_att = {"Non défini": None}
                 if not df_interv_all.empty:
                     opts_att.update({f"{r['prenom']} {r['nom']}": str(r["id"]) for _, r in df_interv_all.iterrows()})
-                att_sel = st.selectbox("Intervenant attitré (optionnel)", list(opts_att.keys()))
+                att_sel = st.selectbox(
+                    "Intervenant attitré (optionnel)",
+                    list(opts_att.keys()),
+                    key="new_b_attitre",
+                )
 
-                if st.form_submit_button("Ajouter") and nom_b and prenom_b:
-                    duplicate_b = False
-                    if not df_b.empty:
-                        duplicate_b = bool((
-                            df_b["nom"].fillna("").astype(str).str.strip().str.casefold().eq(nom_b.strip().casefold())
-                            & df_b["prenom"].fillna("").astype(str).str.strip().str.casefold().eq(prenom_b.strip().casefold())
-                        ).any())
-                    if duplicate_b:
-                        st.error("Un bénéficiaire portant ce nom et ce prénom existe déjà dans la liste active.")
+                add_b_clicked = st.button("Ajouter", key="btn_add_beneficiaire", type="primary")
+
+                if add_b_clicked:
+                    if not nom_b.strip() or not prenom_b.strip():
+                        st.error("Le nom et le prénom sont obligatoires.")
                     else:
-                        new_b = sb_insert("beneficiaires", {
-                        "structure_id": SID, "nom": nom_b.strip(), "prenom": prenom_b.strip(),
-                        "adresse": adresse_b, "telephone": telephone_b, "niveau_dependance": niveau_dep,
-                        "gestes_techniques": gestes_b, "besoins_horaires": horaires_b,
-                        "besoins_recurrents": besoins_rec, "notes": notes_b,
-                        "contact_urgence_nom": contact_urgence_nom_b, "contact_urgence_tel": contact_urgence_tel_b,
-                        "intervenant_attitré_id": opts_att[att_sel],
-                        "statut": "Actif", "date_creation": datetime.date.today().isoformat()
-                        })
-                        if new_b:
-                            audit("CREATE_BENEFICIAIRE", "beneficiaires", new_b.get("id"))
-                            st.success(f"{prenom_b} {nom_b} ajouté(e).")
-                            st.rerun()
+                        duplicate_b = False
+                        if not df_b.empty:
+                            duplicate_b = bool((
+                                df_b["nom"].fillna("").astype(str).str.strip().str.casefold().eq(nom_b.strip().casefold())
+                                & df_b["prenom"].fillna("").astype(str).str.strip().str.casefold().eq(prenom_b.strip().casefold())
+                            ).any())
+
+                        if duplicate_b:
+                            st.error("Un bénéficiaire portant ce nom et ce prénom existe déjà dans la liste active.")
+                        else:
+                            try:
+                                besoins_horaires_b = _besoin_horaire_label(horaires_debut_b, horaires_fin_b)
+                            except ValueError as exc:
+                                st.error(str(exc))
+                            else:
+                                new_b = sb_insert("beneficiaires", {
+                                    "structure_id": SID,
+                                    "nom": nom_b.strip(),
+                                    "prenom": prenom_b.strip(),
+                                    "adresse": adresse_b,
+                                    "telephone": telephone_b,
+                                    "niveau_dependance": niveau_dep,
+                                    "gestes_techniques": gestes_b,
+                                    "besoins_horaires": besoins_horaires_b,
+                                    "besoins_recurrents": besoins_rec,
+                                    "notes": notes_b,
+                                    "contact_urgence_nom": contact_urgence_nom_b,
+                                    "contact_urgence_tel": contact_urgence_tel_b,
+                                    "intervenant_attitré_id": opts_att[att_sel],
+                                    "statut": "Actif",
+                                    "date_creation": datetime.date.today().isoformat(),
+                                })
+                                if new_b:
+                                    audit("CREATE_BENEFICIAIRE", "beneficiaires", new_b.get("id"))
+                                    st.session_state["reset_add_beneficiaire"] = True
+                                    st.success(f"{prenom_b} {nom_b} ajouté(e).")
+                                    st.rerun()
 
 
     # ============================================================
@@ -2093,51 +2429,125 @@ Contrôles OmniCoord :
             if df_interv4.empty:
                 st.info("Ajoutez d'abord un intervenant.")
             else:
-                # Tous les champs sont regroupés dans le même formulaire afin qu'un
-                # changement de date ne déclenche pas un rerun qui réinitialise
-                # l'intervenant ou le type d'habilitation sélectionné.
-                with st.form("form_hab", clear_on_submit=False):
-                    validite_mode = st.radio(
-                        "Validité",
-                        ["Avec date d'expiration", "Valide sans date d'expiration"],
-                        horizontal=True,
-                        key="hab_validite_mode",
-                    )
-                    interv_lbl4 = {f"{r['prenom']} {r['nom']}": str(r["id"]) for _, r in df_interv4.iterrows()}
-                    interv_sel = st.selectbox("Intervenant", list(interv_lbl4.keys()), key="hab_intervenant")
-                    type_hab = st.selectbox("Type", CANONICAL_HABILITATIONS, key="hab_type")
-                    date_obt = st.date_input("Date d'obtention", key="hab_date_obt")
-                    date_exp = None
-                    if validite_mode == "Avec date d'expiration":
-                        date_exp = st.date_input("Date d'expiration", key="hab_date_exp")
+                interv_lbl4 = {}
+                for _, r in df_interv4.iterrows():
+                    nom_aff = f"{r['prenom']} {r['nom']}".strip()
+                    email_aff = str(r.get("email") or "").strip()
+                    suffixe = email_aff if email_aff else str(r["id"])[:8]
+                    interv_lbl4[f"{nom_aff} · {suffixe}"] = str(r["id"])
 
-                    if st.form_submit_button("Ajouter"):
-                        if date_exp is not None and date_exp <= date_obt:
+                interv_sel = st.selectbox("Intervenant", list(interv_lbl4.keys()), key="hab_intervenant_selector")
+                target_id = interv_lbl4[interv_sel]
+
+                target_habs = df_habs[
+                    df_habs["intervenant_id"].astype(str) == str(target_id)
+                ].copy() if not df_habs.empty and "intervenant_id" in df_habs.columns else pd.DataFrame()
+
+                if not target_habs.empty:
+                    target_habs["_type_canonique"] = target_habs["type_habilitation"].astype(str).map(canonicalize_habilitation)
+                    target_habs["_obt_dt"] = pd.to_datetime(target_habs["date_obtention"], errors="coerce").dt.date
+                    target_habs["_exp_dt"] = pd.to_datetime(target_habs["date_expiration"], errors="coerce").dt.date
+                    target_habs = target_habs.sort_values(["_type_canonique", "_obt_dt"], ascending=[True, False])
+
+                    st.markdown("#### 🛠️ Modifier une habilitation existante")
+                    edit_labels = {}
+                    for _, existing in target_habs.iterrows():
+                        exp_value = existing.get("_exp_dt")
+                        exp_label = "sans expiration" if pd.isna(exp_value) or exp_value == NO_EXPIRY_DATE else exp_value.strftime("%d/%m/%Y")
+                        label = f"{existing['_type_canonique']} · expire {exp_label}"
+                        edit_labels[f"{label} · {str(existing['id'])[:8]}"] = str(existing["id"])
+
+                    edit_choice = st.selectbox(
+                        "Habilitation à modifier",
+                        list(edit_labels.keys()),
+                        key=f"compliance_edit_choice_{target_id}",
+                    )
+                    edit_id = edit_labels[edit_choice]
+                    edit_row = target_habs[target_habs["id"].astype(str) == edit_id].iloc[0]
+                    edit_type = edit_row["_type_canonique"]
+                    edit_obt = edit_row.get("_obt_dt")
+                    edit_obt = edit_obt if pd.notna(edit_obt) else datetime.date.today()
+                    edit_exp = edit_row.get("_exp_dt")
+                    edit_sans_exp = pd.isna(edit_exp) or edit_exp == NO_EXPIRY_DATE
+                    edit_exp_default = datetime.date.today() + datetime.timedelta(days=365) if edit_sans_exp else edit_exp
+
+                    with st.form(f"compliance_update_hab_{edit_id}", clear_on_submit=False):
+                        st.text_input("Type", value=edit_type, disabled=True)
+                        date_obt = st.date_input("Date d'obtention", value=edit_obt, key=f"compliance_update_obt_{edit_id}")
+                        sans_exp = st.checkbox(
+                            "Valide sans date d'expiration",
+                            value=edit_sans_exp,
+                            key=f"compliance_update_sans_exp_{edit_id}",
+                        )
+                        date_exp = st.date_input(
+                            "Date d'expiration",
+                            value=edit_exp_default,
+                            key=f"compliance_update_exp_{edit_id}",
+                            help="Cette date est ignorée si « Valide sans date d'expiration » est cochée.",
+                        )
+                        save_hab = st.form_submit_button("💾 Enregistrer la modification")
+
+                    if save_hab:
+                        if not sans_exp and date_exp <= date_obt:
                             st.error("La date d'expiration doit être après la date d'obtention.")
                         else:
-                            target_id = interv_lbl4[interv_sel]
-                            existing_records = []
-                            if not df_habs.empty and "intervenant_id" in df_habs.columns:
-                                existing_records = df_habs[df_habs["intervenant_id"].astype(str) == str(target_id)].to_dict("records")
-                            duplicate_reason = duplicate_habilitation_reason(
-                                existing_records, type_hab, date_obt, permanent=date_exp is None
+                            payload_h = {
+                                "type_habilitation": edit_type,
+                                "date_obtention": date_obt.isoformat(),
+                                "date_expiration": NO_EXPIRY_DATE.isoformat() if sans_exp else date_exp.isoformat(),
+                            }
+                            if sb_update("habilitations", payload_h, "id", edit_id):
+                                audit(
+                                    "UPDATE_HABILITATION",
+                                    "habilitations",
+                                    edit_id,
+                                    {"intervenant_id": str(target_id), "type_canonique": edit_type, "motif": "modification"},
+                                )
+                                st.success("Habilitation mise à jour.")
+                                st.rerun()
+                else:
+                    st.info("Cet intervenant n'a encore aucune habilitation enregistrée.")
+
+                st.markdown("#### ➕ Ajouter un nouveau type d'habilitation")
+                with st.form(f"compliance_add_hab_{target_id}", clear_on_submit=True):
+                    type_hab = st.selectbox("Nouveau type", CANONICAL_HABILITATIONS, key=f"compliance_add_type_{target_id}")
+                    add_obt = st.date_input("Date d'obtention", value=datetime.date.today(), key=f"compliance_add_obt_{target_id}")
+                    add_sans_exp = st.checkbox("Valide sans date d'expiration", value=False, key=f"compliance_add_sans_exp_{target_id}")
+                    add_exp = st.date_input(
+                        "Date d'expiration",
+                        value=datetime.date.today() + datetime.timedelta(days=365),
+                        key=f"compliance_add_exp_{target_id}",
+                        help="Cette date est ignorée si « Valide sans date d'expiration » est cochée.",
+                    )
+                    add_hab = st.form_submit_button("➕ Ajouter")
+
+                if add_hab:
+                    canon_type = canonicalize_habilitation(type_hab)
+                    same_type = target_habs[
+                        target_habs["type_habilitation"].astype(str).map(canonicalize_habilitation) == canon_type
+                    ].copy() if not target_habs.empty and "type_habilitation" in target_habs.columns else pd.DataFrame()
+
+                    if not same_type.empty:
+                        st.warning("Cette habilitation existe déjà. Utilisez la zone « Modifier une habilitation existante ».")
+                    elif not add_sans_exp and add_exp <= add_obt:
+                        st.error("La date d'expiration doit être après la date d'obtention.")
+                    else:
+                        new_h = sb_insert("habilitations", {
+                            "structure_id": SID,
+                            "intervenant_id": target_id,
+                            "type_habilitation": canon_type,
+                            "date_obtention": add_obt.isoformat(),
+                            "date_expiration": NO_EXPIRY_DATE.isoformat() if add_sans_exp else add_exp.isoformat(),
+                        })
+                        if new_h:
+                            audit(
+                                "CREATE_HABILITATION",
+                                "habilitations",
+                                new_h.get("id"),
+                                {"intervenant_id": str(target_id), "sans_expiration": add_sans_exp, "type_canonique": canon_type},
                             )
-                            if duplicate_reason:
-                                st.warning(duplicate_reason)
-                            else:
-                                new_h = sb_insert("habilitations", {
-                                    "structure_id": SID,
-                                    "intervenant_id": target_id,
-                                    "type_habilitation": canonicalize_habilitation(type_hab),
-                                    "date_obtention": date_obt.isoformat(),
-                                    # Sentinelle rétrocompatible : évite d'exiger une migration si
-                                    # date_expiration est NOT NULL dans une base déjà déployée.
-                                    "date_expiration": date_exp.isoformat() if date_exp is not None else NO_EXPIRY_DATE.isoformat(),
-                                })
-                                if new_h:
-                                    audit("CREATE_HABILITATION", "habilitations", new_h.get("id"), {"sans_expiration": date_exp is None, "type_canonique": canonicalize_habilitation(type_hab)})
-                                    st.success("Habilitation ajoutée.")
-                                    st.rerun()
+                            st.success("Habilitation ajoutée.")
+                            st.rerun()
 
 
     # ============================================================
@@ -2322,7 +2732,7 @@ Contrôles OmniCoord :
     # ============================================================
     #  👤 MON PROFIL — Version admin / version client
     # ============================================================
-    elif onglet == "👤 Mon Profil":
+    elif onglet == "⚙️ Paramètres du compte":
 
         if IS_ADMIN:
             # -------------------------------------------------------
@@ -2332,7 +2742,7 @@ Contrôles OmniCoord :
             # -------------------------------------------------------
             st.caption("👑 Compte administrateur OmniCoord IA — Éditeur SaaS")
 
-            st.subheader("🔑 Changer mon mot de passe admin")
+            st.subheader("🔐 Sécurité du compte")
             with st.form("form_mdp_admin"):
                 n1 = st.text_input("Nouveau mot de passe", type="password")
                 n2 = st.text_input("Confirmer", type="password")
@@ -2351,7 +2761,7 @@ Contrôles OmniCoord :
                             st.error("Impossible d'effectuer cette opération pour le moment.")
 
             st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
-            st.subheader("📧 Ma boîte mail (envoi des accès clients)")
+            st.subheader("📧 Messagerie — envoi des accès clients")
             st.info("💡 Cette boîte sert à envoyer automatiquement les identifiants à vos nouveaux clients. Utilisez un **mot de passe d'application Gmail** (pas votre mot de passe personnel). Générez-en un sur myaccount.google.com > Sécurité > Mots de passe des applications.")
 
             with st.form("form_mail_admin"):
@@ -2378,7 +2788,7 @@ Contrôles OmniCoord :
 
             # Test de connexion mail
             st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
-            st.subheader("🧪 Tester l'envoi de mail")
+            st.subheader("🧪 Tester la messagerie")
             email_test = st.text_input("Envoyer un email de test à :")
             if st.button("Envoyer le test") and email_test:
                 ok, msg = envoyer_email(
@@ -2397,7 +2807,7 @@ Contrôles OmniCoord :
             # -------------------------------------------------------
             st.caption(f"Structure : **{st.session_state.get('structure_nom', '—')}**")
 
-            st.subheader("🔑 Changer mon mot de passe")
+            st.subheader("🔐 Sécurité du compte")
             with st.form("form_mdp"):
                 n1 = st.text_input("Nouveau mot de passe", type="password")
                 n2 = st.text_input("Confirmer", type="password")
@@ -2416,7 +2826,7 @@ Contrôles OmniCoord :
                             st.error("Impossible d'effectuer cette opération pour le moment.")
 
             st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
-            st.subheader("📧 Ma boîte mail (sollicitations intervenants)")
+            st.subheader("📧 Messagerie — sollicitations intervenants")
             st.info("💡 Gmail : utilisez un **mot de passe d'application** (pas votre mot de passe principal). Générez-en un sur myaccount.google.com > Sécurité > Mots de passe des applications.")
 
             with st.form("form_mail"):
@@ -2465,7 +2875,7 @@ Contrôles OmniCoord :
 
         tab_clients, tab_creer, tab_quotas, tab_audit, tab_secu = st.tabs([
             "📋 Mes clients",
-            "➕ Créer un accès client",
+            "✉️ Inviter un client",
             "📊 Quotas IA",
             "📋 Journal d'audit",
             "🔐 Sécurité"
@@ -2504,7 +2914,7 @@ Contrôles OmniCoord :
             st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
 
             if df_clients.empty:
-                st.info("Aucun client créé pour l'instant. Utilisez l'onglet « Créer un accès client » pour commencer.")
+                st.info("Aucun client créé pour l'instant. Utilisez l'onglet « Inviter un client » pour commencer.")
             else:
                 # Récupérer les noms de structure
                 struct_noms = {}
@@ -2582,21 +2992,23 @@ Contrôles OmniCoord :
                                 st.success("Compteur IA remis à zéro.")
                                 st.rerun()
 
-                        # Renvoyer les identifiants par mail
-                        if st.button("📧 Renvoyer les identifiants par mail", key=f"remail_{client['id']}"):
+                        # Envoyer un rappel de connexion sans jamais transmettre de mot de passe
+                        if st.button("📧 Envoyer un rappel de connexion", key=f"remail_{client['id']}"):
                             ok, msg = envoyer_email(
                                 client["email"],
-                                "OmniCoord IA — Vos identifiants de connexion",
+                                "OmniCoord IA — Rappel de connexion",
                                 f"Bonjour,\n\n"
-                                f"Voici vos identifiants pour accéder à OmniCoord IA :\n\n"
+                                f"Votre accès OmniCoord IA est disponible ici :\n\n"
                                 f"🔗 Lien : {APP_URL}\n"
                                 f"📧 Email : {client['email']}\n"
                                 f"📅 Accès valable jusqu'au : {date_fin_c}\n\n"
-                                f"Si vous avez oublié votre mot de passe, contactez l'administrateur.\n\n"
+                                f"Votre mot de passe reste personnel et n'est jamais communiqué par OmniCoord.\n\n"
                                 f"Cordialement,\nOmniCoord IA"
                             )
-                            if ok: st.success(f"✅ Email envoyé à {client['email']}")
-                            else: st.error(f"❌ {msg}")
+                            if ok:
+                                st.success(f"✅ Rappel envoyé à {client['email']}")
+                            else:
+                                st.error(f"❌ {msg}")
 
                         # Supprimer le client
                         st.markdown("<div class='oc-metal-divider'></div>", unsafe_allow_html=True)
@@ -2618,97 +3030,119 @@ Contrôles OmniCoord :
                                 st.warning("Cochez la case de confirmation.")
 
         # ----------------------------------------------------------
-        #  TAB 2 : CRÉER UN ACCÈS CLIENT
+        #  TAB 2 : INVITER UN CLIENT
         # ----------------------------------------------------------
         with tab_creer:
-            st.subheader("➕ Créer un accès client")
-            st.caption("Crée un compte pour un nouveau client. Un email avec le lien, l'identifiant et le mot de passe lui sera envoyé automatiquement.")
+            st.subheader("✉️ Inviter un nouveau client")
+            st.caption(
+                "Crée la structure et l'accès OmniCoord, puis envoie un lien d'activation sécurisé. "
+                "Le client choisit lui-même son mot de passe : aucun mot de passe temporaire n'est transmis."
+            )
 
-            with st.form("form_creer_client"):
+            with st.form("form_inviter_client"):
                 col_c1, col_c2 = st.columns(2)
                 with col_c1:
                     nom_structure = st.text_input("Nom de la structure (SAAD / SSIAD) *")
                     email_client = st.text_input("Email du client *")
-                    mdp_client = st.text_input("Mot de passe temporaire *")
                 with col_c2:
                     duree_acces = st.number_input("Durée d'accès (jours)", min_value=1, value=30)
                     statut_abo = st.selectbox("Type d'abonnement", ["ESSAI", "PRO"])
                     quota_ia = st.number_input("Quota IA (nombre de requêtes)", min_value=1, value=20)
 
-                envoyer_mail_auto = st.checkbox("📧 Envoyer automatiquement les identifiants par email", value=True)
-                btn_creer = st.form_submit_button("🚀 Créer l'accès client")
+                btn_creer = st.form_submit_button("✉️ Envoyer l'invitation")
 
-                if btn_creer:
-                    if not nom_structure or not email_client or not mdp_client:
-                        st.error("Tous les champs avec * sont obligatoires.")
-                    elif len(mdp_client) < 8:
-                        st.error("Le mot de passe doit faire au moins 8 caractères.")
-                    else:
-                        # 1. Créer la structure
-                        struct_existante = sb_select("structures", {"nom": nom_structure.strip()})
+            if btn_creer:
+                nom_structure_clean = nom_structure.strip()
+                email_client_clean = email_client.strip().lower()
+
+                if not nom_structure_clean or not email_client_clean:
+                    st.error("Tous les champs avec * sont obligatoires.")
+                elif "@" not in email_client_clean:
+                    st.error("Saisissez une adresse email valide.")
+                else:
+                    struct_id = None
+                    structure_created = False
+                    new_uid = None
+                    profile_created = False
+                    try:
+                        # 1. Créer ou réutiliser la structure.
+                        struct_existante = sb_select("structures", {"nom": nom_structure_clean})
                         if struct_existante.empty:
-                            struct_res = sb_insert("structures", {"nom": nom_structure.strip()})
-                            if struct_res:
-                                struct_id = struct_res["id"]
-                            else:
-                                struct_id = None
+                            struct_res = sb_insert("structures", {"nom": nom_structure_clean})
+                            if not struct_res:
+                                raise RuntimeError("Création de la structure impossible")
+                            struct_id = struct_res["id"]
+                            structure_created = True
                         else:
                             struct_id = struct_existante.iloc[0]["id"]
 
-                        if struct_id:
-                            date_fin = (datetime.date.today() + datetime.timedelta(days=int(duree_acces))).isoformat()
+                        # 2. Générer une invitation Supabase sans mot de passe administrateur.
+                        new_uid, token_hash = create_invited_auth_user(email_client_clean)
+
+                        # 3. Créer le profil OmniCoord avant d'envoyer le lien.
+                        date_fin = (datetime.date.today() + datetime.timedelta(days=int(duree_acces))).isoformat()
+                        profile = sb_insert("profils", {
+                            "id": new_uid,
+                            "structure_id": struct_id,
+                            "email": email_client_clean,
+                            "est_admin": False,
+                            "statut_abonnement": statut_abo,
+                            "quota_max_ia": int(quota_ia),
+                            "date_fin_essai": date_fin,
+                        })
+                        if not profile:
+                            raise RuntimeError("Création du profil client impossible")
+                        profile_created = True
+
+                        # 4. Envoyer notre propre invitation via la messagerie OmniCoord.
+                        invite_link = f"{APP_URL}?invite_token={urllib.parse.quote(token_hash)}&type=invite"
+                        ok, msg = envoyer_email(
+                            email_client_clean,
+                            "Bienvenue sur OmniCoord IA — Activez votre compte",
+                            f"Bonjour,\n\n"
+                            f"Votre accès à OmniCoord IA pour la structure « {nom_structure_clean} » est prêt.\n\n"
+                            f"Pour activer votre compte et choisir vous-même votre mot de passe, utilisez ce lien :\n"
+                            f"{invite_link}\n\n"
+                            f"📅 Votre accès est valable jusqu'au {date_fr(date_fin, 'court')}.\n\n"
+                            f"Pour votre sécurité, OmniCoord ne connaît pas et ne vous enverra jamais votre mot de passe.\n\n"
+                            f"Cordialement,\n"
+                            f"L'équipe OmniCoord IA"
+                        )
+                        if not ok:
+                            raise RuntimeError(f"Invitation non envoyée : {msg}")
+
+                        audit("INVITE_CLIENT", "profils", new_uid, {
+                            "structure": nom_structure_clean,
+                            "email": email_client_clean,
+                            "duree": int(duree_acces),
+                            "statut": statut_abo,
+                        })
+                        st.success(
+                            f"✅ Invitation envoyée à **{email_client_clean}** pour **{nom_structure_clean}**. "
+                            f"Le client choisira lui-même son mot de passe."
+                        )
+
+                    except Exception as exc:
+                        logger.exception("Invitation client impossible")
+                        # Rollback best-effort : ne pas laisser un compte incomplet si l'envoi échoue.
+                        if profile_created and new_uid:
+                            sb_delete("profils", "id", str(new_uid))
+                        if new_uid:
                             try:
-                                # 2. Créer l'utilisateur dans Supabase Auth
-                                auth_res = create_auth_user(email_client, mdp_client)
-                                new_uid = auth_res.user.id
+                                delete_auth_user(str(new_uid))
+                            except Exception:
+                                logger.exception("Rollback Auth invitation impossible")
+                        if structure_created and struct_id:
+                            try:
+                                sb_delete("structures", "id", str(struct_id))
+                            except Exception:
+                                logger.exception("Rollback structure invitation impossible")
 
-                                # 3. Créer le profil
-                                sb_insert("profils", {
-                                    "id": new_uid,
-                                    "structure_id": struct_id,
-                                    "email": email_client.strip().lower(),
-                                    "est_admin": False,
-                                    "statut_abonnement": statut_abo,
-                                    "quota_max_ia": int(quota_ia),
-                                    "date_fin_essai": date_fin
-                                })
-                                audit("CREATE_CLIENT", "profils", new_uid, {
-                                    "structure": nom_structure, "email": email_client, "duree": duree_acces
-                                })
-
-                                st.success(f"✅ Accès créé pour **{email_client}** (structure : {nom_structure}) jusqu'au **{date_fr(date_fin, 'court')}**")
-
-                                # 4. Envoyer les identifiants par mail (si coché)
-                                if envoyer_mail_auto:
-                                    ok, msg = envoyer_email(
-                                        email_client,
-                                        "Bienvenue sur OmniCoord IA — Vos identifiants",
-                                        f"Bonjour,\n\n"
-                                        f"Votre accès à OmniCoord IA a été créé avec succès.\n\n"
-                                        f"🔗 Lien de connexion : {APP_URL}\n\n"
-                                        f"📧 Identifiant : {email_client}\n"
-                                        f"🔑 Mot de passe : {mdp_client}\n\n"
-                                        f"📅 Votre accès est valable jusqu'au {date_fr(date_fin, 'court')}.\n\n"
-                                        f"⚠️ Nous vous recommandons de changer votre mot de passe dès votre première connexion (Mon Profil > Changer mon mot de passe).\n\n"
-                                        f"Pour toute question, contactez-nous.\n\n"
-                                        f"Cordialement,\n"
-                                        f"L'équipe OmniCoord IA"
-                                    )
-                                    if ok:
-                                        st.success(f"📧 Email envoyé à {email_client}")
-                                    else:
-                                        st.warning(f"⚠️ Accès créé mais email non envoyé : {msg}")
-                                        st.info(f"Identifiants à transmettre manuellement :\n- Lien : {APP_URL}\n- Email : {email_client}\n- Mot de passe : {mdp_client}")
-                                else:
-                                    st.info(f"📋 Identifiants à transmettre manuellement :\n- **Lien** : {APP_URL}\n- **Email** : {email_client}\n- **Mot de passe** : {mdp_client}")
-
-                            except Exception as e:
-                                err_msg = str(e)
-                                if "already been registered" in err_msg or "already exists" in err_msg:
-                                    st.error("Cet email est déjà utilisé par un autre compte.")
-                                else:
-                                    logger.exception("Création client impossible")
-                                    st.error("Erreur lors de la création du client. Réessayez ou consultez les journaux.")
+                        err_msg = str(exc)
+                        if "already" in err_msg.lower() or "registered" in err_msg.lower():
+                            st.error("Cet email est déjà utilisé par un autre compte.")
+                        else:
+                            st.error("Impossible d'envoyer l'invitation. Aucune création incomplète n'a été conservée.")
 
         # ----------------------------------------------------------
         #  TAB 3 : QUOTAS IA
